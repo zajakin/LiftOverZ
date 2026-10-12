@@ -1,0 +1,3 @@
+CrossMap
+tkinterdnd2
+pyinstaller
