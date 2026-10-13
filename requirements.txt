@@ -1,3 +1,5 @@
 CrossMap
+pybigtools
 tkinterdnd2
 pyinstaller
+numpy
