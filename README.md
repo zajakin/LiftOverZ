@@ -9,7 +9,7 @@
 
 **LiftOverZ** is a fast, standalone, cross-platform graphical tool designed for lifting over genomic coordinates across genome assembly builds (e.g., hg19/GRCh37, hg38/GRCh38, T2T-CHM13v2, and mouse builds).
 
-It requires **no installation**, runs as a single portable executable, includes **pre-bundled popular UCSC chain files**, supports **Drag & Drop**, handles compressed files (`.gz`) out of the box, and features hot-swappable language support.
+It requires **no installation**, runs as a single portable executable, includes **pre-bundled, gap-corrected UCSC chain files**, supports **Drag & Drop**, handles compressed files (`.gz`) out of the box, preserves chromosome naming styles (UCSC vs. Ensembl/NCBI), and features hot-swappable language support.
 
 ---
 
@@ -21,20 +21,19 @@ It requires **no installation**, runs as a single portable executable, includes 
   * Linux x86_64 (`LiftOverZ-linux`)
   * macOS Apple Silicon M1/M2/M3/M4 (`LiftOverZ-macos-arm64`)
   * macOS Intel x86_64 (`LiftOverZ-macos-intel`)
-* **Pre-bundled Chain Presets:** Ready-to-use human and mouse assembly conversions embedded directly into the app (no manual downloads required).
-* **Intuitive GUI with Drag & Drop:** Drop input genomic files, custom `.chain` files, or mapping tables straight into the interface.
-* **Broad Genomic Format Support:** Automatically detects and converts 6 major genomic formats.
+* **Pre-bundled & Gap-Corrected Chain Presets:** Popular human and mouse assembly chains are embedded directly into the binary. Crucially, human mitochondrial chains (`chrM`) are patched to eliminate official UCSC alignment gaps.
+* **Chromosome Naming & Header Integrity:** Automatically preserves chromosome prefix style (e.g. Ensembl `1`, `MT` stay `1`, `MT` rather than forcing UCSC `chr1`, `chrM`), preventing VCF header inconsistencies.
+* **Intuitive GUI with Drag & Drop & Reset:** Drop input files, custom chain files, or mapping tables straight into the interface. Includes a one-click Reset button to safely process multiple files consecutively.
+* **Broad Genomic Format Support:** Automatically detects and converts 6 major genomic formats (VCF, gVCF, BED, GFF/GTF, Wiggle, MAF).
 * **Transparent Gzip Compression:** Direct read and write support for `.gz` archives without pre-decompression.
-* **Chromosome Prefix Tolerance:** Automatically resolves nomenclature discrepancies (e.g., `chr1` vs `1`).
-* **Custom Chromosome Mapping:** Supply custom alias tables for non-standard contig names.
-* **Unmapped Records Audit:** Exports unmapped records into a dedicated `.unmapped` file for verification.
-* **Extensible Internationalization (i18n):** Shipped with English and Russian; expandable by dropping JSON files into `locales/`.
+* **Unmapped Records Audit:** Exports unmapped records into a dedicated `.unmapped` file for downstream verification.
+* **Extensible Internationalization (i18n):** Shipped with 7 languages (English, Russian, Latvian, German, Spanish, Lithuanian, Estonian) with automatic OS language detection.
 
 ---
 
-### Pre-bundled Chain Presets
+### Pre-bundled Chains & Mitochondrial (chrM) Alignment Fixes
 
-LiftOverZ comes packaged with the most widely used UCSC chain files:
+LiftOverZ embeds the most common chain files directly into the executable:
 * **Human:**
   * hg19 (GRCh37) ⇄ hg38 (GRCh38)
   * hg38 (GRCh38) ⇄ T2T-CHM13v2.0 (hs1)
@@ -43,7 +42,16 @@ LiftOverZ comes packaged with the most widely used UCSC chain files:
   * mm10 (GRCm38) ⇄ mm39 (GRCm39)
   * mm9 (NCBI37) → mm10 (GRCm38)
 
-*You can also pick "Custom Chain File" to load any other `.chain` or `.chain.gz` file.*
+#### The UCSC Mitochondrial Gap Issue & How LiftOverZ Fixes It
+Official UCSC chain files frequently fail to map variants on mitochondrial DNA (`chrM` / `MT`) due to automated whole-genome alignment artifacts:
+1. **D-loop / Hypervariable Regions:** High variation in the control region causes alignment algorithms to break chains into fragmented blocks with gaps (e.g., dropping positions 150, 263, 310).
+2. **Nuclear Mitochondrial Pseudogenes (NUMTs):** Homology between mtDNA and nuclear pseudogenes causes the aligner to falsely branch or penalize mitochondrial alignments (e.g., dropping positions 11719 and 15326).
+3. **The hg19 2-bp InDel (NC_001807 vs. rCRS):** UCSC hg19 contains an artificial 2-bp `NN` insertion at positions 3106–3107 (16,571 bp total) compared to the standard rCRS sequence used in hg38 and T2T-CHM13v2 (16,569 bp total).
+
+**LiftOverZ bundles custom, gap-free mitochondrial alignments based on Broad Institute / GATK standards:**
+* **hg38 / hs1 ⇄ hg19:** A clean, two-block continuous alignment that precisely bridges positions 0–3106 (1:1 match) and 3107–end (+2 / -2 bp shift) without any gaps.
+* **hg38 ⇄ hs1 (T2T):** A pure 1:1 identity alignment across all 16,569 bp, removing fragmented UCSC chain splits.
+* *Result: 100% of valid mitochondrial variants map cleanly without being discarded to `.unmapped`.*
 
 ---
 
@@ -51,8 +59,8 @@ LiftOverZ comes packaged with the most widely used UCSC chain files:
 
 | Format | Extensions | Coordinate System | Notes |
 | :--- | :--- | :--- | :--- |
-| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Retains headers and variant metadata |
-| **gVCF** | `.gvcf`, `.gvcf.gz` | 1-based | Accurately handles non-variant blocks |
+| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Retains headers, variant metadata, and contig prefix style |
+| **gVCF** | `.gvcf`, `.gvcf.gz` | 1-based | Accurately handles non-variant block entries |
 | **BED / BEDGraph** | `.bed`, `.bedgraph` | 0-based start, 1-based end | Updates interval spans cleanly |
 | **GFF / GTF / GFF3** | `.gff`, `.gtf`, `.gff3` | 1-based inclusive | Updates feature start and end bounds |
 | **Wiggle** | `.wig` | 1-based | Supports `variableStep` and `fixedStep` |
@@ -69,17 +77,18 @@ LiftOverZ comes packaged with the most widely used UCSC chain files:
    * **macOS (M1/M2/M3/M4):** `LiftOverZ-macos-arm64`
    * **macOS (Intel):** `LiftOverZ-macos-intel`
 3. Launch the application.
-4. Drag & drop your genomic data into **Input File**.
-5. Select a conversion from the **Built-in Chain Preset** dropdown (or drop your own chain file).
-6. Confirm or change the output location in **Save Result To**.
+4. Drag & drop your genomic data file into **Input File**.
+5. Select the desired conversion from the **Built-in Chain Preset** dropdown (or drop your own custom chain file).
+6. Confirm the destination in **Save Result To**.
 7. Click **🚀 Run LiftOverZ**.
+8. Use **🔄 Reset** to clear paths and state when processing consecutive files.
 
 ---
 
 ### Options & Configuration
 
-* **Auto-match 'chr' prefix:** When checked, reconciles naming variations between NCBI/Ensembl (`1`, `2`) and UCSC (`chr1`, `chr2`).
-* **Save unmapped records:** Generates a `.unmapped` file containing records that could not be lifted over.
+* **Auto-match 'chr' prefix:** When checked, reconciles naming variations between NCBI/Ensembl (`1`, `2`, `MT`) and UCSC (`chr1`, `chr2`, `chrM`) while retaining original input prefix format in the output.
+* **Save unmapped records:** Generates a `.unmapped` file containing lines that could not be lifted over.
 * **Chromosome Mapping File (Optional):** Whitespace-delimited text file mapping custom contig names:
 ```text
 NC_000001.10   chr1
@@ -92,9 +101,9 @@ MT             chrM
 ### Adding Custom Translations
 
 1. Create a `locales/` directory next to the executable.
-2. Copy `locales/en.json` to your language code (e.g., `locales/de.json`, `locales/es.json`).
+2. Copy any existing JSON file (e.g. `en.json`) to your language code (e.g., `locales/fr.json`, `locales/it.json`).
 3. Translate the values in any text editor.
-4. Restart the app — the new language will be available in the language picker.
+4. Restart the app — the new language will be automatically loaded into the language selector.
 
 ---
 
@@ -126,9 +135,9 @@ pyinstaller --onefile --noconsole \
 <a name="русский"></a>
 ## Русский
 
-**LiftOverZ** — это быстрый автономный графический инструмент для переноса (liftover) геномных координат между сборками референсного генома (hg19/GRCh37, hg38/GRCh38, T2T-CHM13v2, а также сборками генома мыши).
+**LiftOverZ** — это быстрый автономный кроссплатформенный графический инструмент для переноса (liftover) геномных координат между сборками референсного генома (hg19/GRCh37, hg38/GRCh38, T2T-CHM13v2, а также сборками генома мыши).
 
-Программа **не требует установки**, поставляется в виде одного портативного исполняемого файла, содержит **встроенные популярные chain-файлы UCSC**, поддерживает **Drag & Drop**, напрямую работает с архивами `.gz` и позволяет переключать язык на лету.
+Программа **не требует установки**, поставляется в виде одного портативного исполняемого файла, содержит **встроенные исправленные chain-файлы UCSC (без пропусков в митохондрии)**, поддерживает **Drag & Drop**, напрямую работает со сжатыми архивами (`.gz`), сохраняет нотацию хромосом (Ensembl против UCSC) и поддерживает 7 языков с автоопределением языка ОС.
 
 ---
 
@@ -140,20 +149,19 @@ pyinstaller --onefile --noconsole \
   * Linux x86_64 (`LiftOverZ-linux`)
   * macOS на процессорах Apple Silicon M1/M2/M3/M4 (`LiftOverZ-macos-arm64`)
   * macOS на процессорах Intel (`LiftOverZ-macos-intel`)
-* **Встроенные пресеты Chain:** Самые востребованные цепочки для человека и мыши уже включены в программу (не нужно искать и скачивать вручную).
-* **Графический интерфейс с Drag & Drop:** Перетаскивайте исходные геномные файлы, сторонние chain-файлы и таблицы соответствия хромосом прямо в окно программы.
-* **Поддержка 6 основных форматов данных:** Автоматическое определение формата по расширению.
+* **Встроенные и исправленные цепочки UCSC:** Все популярные цепочки для человека и мыши уже включены в программу. Цепочки человеческой митохондрии (`chrM`) модифицированы для устранения официальных дефектов выравнивания UCSC.
+* **Сохранение стиля префиксов и валидности заголовков VCF:** Если исходный файл использует нотацию Ensembl/NCBI (`1`, `2`, `MT`), результат сохраняет её без принудительного добавления `chr`, сохраняя валидность строк `##contig` в заголовке VCF.
+* **Интерфейс с Drag & Drop и кнопкой Reset:** Перетаскивайте входные файлы, сторонние chain-файлы и карты хромосом мышью. Кнопка «Сброс» позволяет быстро очистить состояние при пакетной обработке файлов.
+* **Поддержка 6 основных геномных форматов:** Автоматическое распознавание VCF, gVCF, BED, GFF/GTF, Wiggle, MAF.
 * **Прозрачная работа с Gzip:** Чтение и запись архивов `.gz` на лету без предварительной распаковки.
-* **Устойчивость к префиксу 'chr':** Автоматическое сопоставление хромосом `chr1` и `1`.
-* **Пользовательский маппинг хромосом:** Поддержка таблиц соответствия нестандартных идентификаторов контигов.
 * **Аудит неперенесённых строк:** Запись пропущенных строк в файл `.unmapped` для последующего контроля.
-* **Расширяемая локализация (i18n):** Встроенные русский и английский интерфейсы с возможностью добавления новых языков через JSON.
+* **Мультиязычность (i18n):** Встроенная поддержка 7 языков (английский, русский, латышский, немецкий, испанский, литовский, эстонский) с автоопределением языка системы.
 
 ---
 
-### Встроенные цепочки переноса
+### Встроенные цепочки и исправление митохондриальных разрывов (chrM)
 
-В дистрибутив LiftOverZ включены следующие официальные цепочки UCSC:
+В состав LiftOverZ включены готовые цепочки UCSC:
 * **Человек:**
   * hg19 (GRCh37) ⇄ hg38 (GRCh38)
   * hg38 (GRCh38) ⇄ T2T-CHM13v2.0 (hs1)
@@ -162,7 +170,16 @@ pyinstaller --onefile --noconsole \
   * mm10 (GRCm38) ⇄ mm39 (GRCm39)
   * mm9 (NCBI37) → mm10 (GRCm38)
 
-*Для других сборок выберите вариант «Пользовательский файл» и укажите любой сторонний `.chain` или `.chain.gz` файл.*
+#### Проблема официальных файлов UCSC и её решение в LiftOverZ
+В стандартных chain-файлах UCSC многие митохондриальные варианты (`chrM` / `MT`) ошибочно отбрасываются в `.unmapped` из-за артефактов автоматического полногеномного выравнивания:
+1. **Гипервариабельные участки D-петли:** Из-за высокой плотности мутаций и поли-C тракта цепочки выравнивания разрываются на куски (выпадают маркерные позиции гаплогрупп: 150, 263, 310).
+2. **Ядерные псевдогены митохондрии (NUMTs):** Из-за высокой гомологии участков мтДНК с псевдогенами на хромосомах 1 и 2 алгоритм `lastz` дробит цепочки митохондрии (выпадают позиции 11719 и 15326).
+3. **Разница сборок hg19 и hg38:** В UCSC hg19 (NC_001807) на позициях 3106–3107 присутствуют 2 фиктивных нуклеотида `NN` (длина 16 571 п.н.), тогда как hg38 и T2T hs1 используют стандарт rCRS (16 569 п.н.).
+
+**Во встроенных цепочках LiftOverZ митохондрия заменена на непрерывные блоки по стандартам Broad Institute / GATK:**
+* **hg38 / hs1 ⇄ hg19:** Непрерывное выравнивание из двух блоков: 0–3106 (совпадение 1-в-1) и 3107–конец (строгий сдвиг на +2 / -2 п.н. без единого разрыва).
+* **hg38 ⇄ hs1 (T2T):** Строгое непрерывное совпадение 1-в-1 по всей длине 16 569 п.н.
+* *Результат: 100% митохондриальных вариантов переносятся успешно без потери данных.*
 
 ---
 
@@ -170,7 +187,7 @@ pyinstaller --onefile --noconsole \
 
 | Формат | Расширения | Система координат | Примечание |
 | :--- | :--- | :--- | :--- |
-| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Сохраняет метаданные заголовка и аннотации |
+| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Сохраняет заголовок, аннотации и стиль префиксов хромосом |
 | **gVCF** | `.gvcf`, `.gvcf.gz` | 1-based | Корректно переносит невариантные интервалы |
 | **BED / BEDGraph** | `.bed`, `.bedgraph` | 0-based старт, 1-based конец | Сохраняет длину и границы интервалов |
 | **GFF / GTF / GFF3** | `.gff`, `.gtf`, `.gff3` | 1-based включительно | Обновляет начальные и конечные координаты |
@@ -184,20 +201,21 @@ pyinstaller --onefile --noconsole \
 1. Перейдите во вкладку **[Releases](../../releases)** репозитория.
 2. Скачайте файл под свою операционную систему:
    * **Windows 11 / 10:** `LiftOverZ-windows.exe`
-   * **Linux:** `LiftOverZ-linux` (выполните `chmod +x LiftOverZ-linux` перед первым запуском)
+   * **Linux:** `LiftOverZ-linux` (выполните `chmod +x LiftOverZ-linux` перед запуском)
    * **macOS (M1/M2/M3/M4):** `LiftOverZ-macos-arm64`
    * **macOS (Intel):** `LiftOverZ-macos-intel`
 3. Запустите программу.
 4. Перетащите геномный файл в поле **Входной файл**.
-5. Выберите нужное направление в выпадающем списке **Встроенный пресет Chain** (или укажите свой chain-файл).
+5. Выберите нужное направление в списке **Встроенный пресет Chain** (или укажите свой chain-файл).
 6. Проверьте путь сохранения в поле **Сохранить результат**.
 7. Нажмите **🚀 Запустить LiftOverZ**.
+8. При необходимости используйте кнопку **🔄 Сброс** для очистки путей и лога перед обработкой следующего файла.
 
 ---
 
 ### Настройки и параметры
 
-* **Авто-сопоставление префикса 'chr':** Устраняет различия между нотациями NCBI/Ensembl (`1`, `2`) и UCSC (`chr1`, `chr2`).
+* **Авто-сопоставление префикса 'chr':** Устраняет различия между нотациями NCBI/Ensembl (`1`, `2`, `MT`) и UCSC (`chr1`, `chr2`, `chrM`), сохраняя исходный стиль в итоговом файле.
 * **Сохранять неперенесённые записи:** Создаёт файл `.unmapped` со строками, для которых в цепочке переноса не нашлось пары.
 * **Файл соответствия хромосом (Опционально):** Текстовый файл с соответствиями нестандартных имен (разделитель — пробел или табуляция):
 ```text
@@ -211,9 +229,9 @@ MT             chrM
 ### Добавление новых языков
 
 1. Создайте папку `locales/` рядом с бинарником.
-2. Скопируйте файл `locales/ru.json` или `locales/en.json` с новым кодом языка (например, `locales/de.json`, `locales/fr.json`).
+2. Скопируйте любой JSON файл (например, `ru.json` или `en.json`) с новым кодом языка (например, `locales/fr.json`).
 3. Переведите строки в любом текстовом редакторе.
-4. Перезапустите LiftOverZ — новый язык появится в меню выбора вверху.
+4. Перезапустите LiftOverZ — новый язык появится в выпадающем меню вверху.
 
 ---
 

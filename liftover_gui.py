@@ -13,7 +13,7 @@ from pyliftover import LiftOver
 
 def detect_system_language():
     """Определяет двухбуквенный код языка интерфейса операционной системы"""
-    # 1. Windows: чтение системной локали через WinAPI
+    # 1. Windows: системный вызов WinAPI
     if sys.platform.startswith('win'):
         try:
             import ctypes
@@ -26,7 +26,7 @@ def detect_system_language():
         except Exception:
             pass
 
-    # 2. Linux / macOS / POSIX: системные переменные окружения
+    # 2. Linux / macOS: переменные окружения
     for env_var in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
         val = os.environ.get(env_var)
         if val:
@@ -49,14 +49,13 @@ def detect_system_language():
 
 
 class I18nManager:
-    """Универсальный менеджер локализации с каскадным fallback на английский"""
+    """Менеджер локализации без хардкода строк в коде с fallback на английский"""
     def __init__(self, default_lang=None):
         self.languages = {}
         self.translations = {}
         self.fallback_translations = {}
         self._load_available_languages()
 
-        # Загружаем базовый английский словарь для fallback
         if "en" in self.languages:
             try:
                 with open(self.languages["en"]["path"], 'r', encoding='utf-8') as f:
@@ -101,7 +100,6 @@ class I18nManager:
                 self.translations = {}
 
     def t(self, key, **kwargs):
-        # 1. Текущий язык -> 2. Английский fallback -> 3. Имя самого ключа
         text = self.translations.get(key, self.fallback_translations.get(key, key))
         if kwargs:
             try:
@@ -119,18 +117,16 @@ def parse_dnd_path(event_data):
 
 
 def find_preset_chain(filename):
-    """Поиск встроенного chain-файла в ресурсах сборки и локальной директории"""
+    """Поиск встроенного chain-файла в папке chains внутри сборки или рядом с ней"""
     search_dirs = []
     if hasattr(sys, '_MEIPASS'):
         search_dirs.extend([
             os.path.join(sys._MEIPASS, "chains"),
-            os.path.join(sys._MEIPASS, "changes"),
             sys._MEIPASS
         ])
     base_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
     search_dirs.extend([
         os.path.join(base_dir, "chains"),
-        os.path.join(base_dir, "changes"),
         base_dir
     ])
 
@@ -275,7 +271,6 @@ class LiftOverZApp:
         self.chk_save_unm_w = ttk.Checkbutton(self.opts_frame, variable=self.save_unmapped)
         self.chk_save_unm_w.grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
 
-        # Панель кнопок: Запуск и Сброс
         btn_action_frame = ttk.Frame(self.main_frame)
         btn_action_frame.pack(fill=tk.X, pady=5)
         btn_action_frame.columnconfigure(0, weight=3)
@@ -323,7 +318,7 @@ class LiftOverZApp:
             self.cb_presets.current(curr_idx)
 
     def _reset_all(self):
-        """Очищает поля, восстанавливает настройки по умолчанию и сбрасывает логи"""
+        """Полная очистка полей и логов"""
         self.input_path.set("")
         self.out_path.set("")
         self.chrom_map_path.set("")
@@ -419,7 +414,7 @@ class LiftOverZApp:
         elif ext.endswith('.maf'):
             self.selected_format.set("MAF (.maf)")
 
-        # Всегда формируем актуальное имя файла результата при смене входного файла
+        # Формирование уникального имени выходного файла
         if filename.endswith('.gz'):
             base, ext_inner = os.path.splitext(filename[:-3])
             ext_name = ext_inner + '.gz'
@@ -471,7 +466,6 @@ class LiftOverZApp:
             return res[0]
 
         if auto_chr:
-            # 1. Автоматическая обработка митохондрий (MT, chrM, M, chrMT)
             if target_chrom.upper() in ('MT', 'CHRM', 'M', 'CHRMT'):
                 for m_alias in ('chrM', 'MT', 'M', 'chrMT'):
                     if m_alias != target_chrom:
@@ -479,7 +473,6 @@ class LiftOverZApp:
                         if res:
                             return res[0]
 
-            # 2. Стандартное сопоставление chr <-> non-chr (1 <-> chr1)
             alt_chrom = target_chrom[3:] if target_chrom.startswith('chr') else 'chr' + target_chrom
             res = lo.convert_coordinate(alt_chrom, pos_0)
             if res:
@@ -489,11 +482,6 @@ class LiftOverZApp:
 
     @staticmethod
     def _format_output_chrom(orig_chrom, target_chrom):
-        """
-        Сохраняет исходный стиль именования хромосом входного файла.
-        Если входной файл был без префикса 'chr' (например, Ensembl/NCBI: 1, 2, MT),
-        то результат конверсии (UCSC 'chr1', 'chrM') возвращается без 'chr' (1, 2, MT).
-        """
         if orig_chrom.upper() == 'MT':
             return 'MT'
         if orig_chrom.lower() == 'chrm':

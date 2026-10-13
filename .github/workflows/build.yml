@@ -63,15 +63,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Синхронизация имени папки chains / changes перед упаковкой
-      - name: Prepare Chains Folder
-        run: |
-          if [ -d "changes" ] && [ ! -d "chains" ]; then
-            cp -r changes chains
-          elif [ -d "chains" ] && [ ! -d "changes" ]; then
-            cp -r chains changes
-          fi
-
       - name: Build Standalone Executable with PyInstaller
         run: pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --add-data "chains${{ matrix.data_sep }}chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
 
