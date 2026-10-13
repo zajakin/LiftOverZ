@@ -149,8 +149,7 @@ pip install -r requirements.txt
 python liftover_gui.py
 
 # Build a standalone binary
-pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
-  --collect-all pyfaidx \
+pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --collect-all pyfaidx --name LiftOverZ liftover_gui.py
 ```
 *(On Windows, replace `:locales` and `:chains` with `;locales` and `;chains` in `--add-data`)*
 
@@ -295,6 +294,6 @@ pip install -r requirements.txt
 python liftover_gui.py
 
 # Сборка автономного бинарника
-pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
+pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --collect-all pyfaidx --name LiftOverZ liftover_gui.py
 ```
 *(В Windows замените разделители двоеточия `:locales` и `:chains` на точку с запятой `;locales` и `;chains`)*
