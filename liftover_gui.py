@@ -65,7 +65,7 @@ def parse_dnd_path(event_data):
 
 
 def find_preset_chain(filename):
-    """Ищет встроенный chain-файл в папках chains или changes"""
+    """Поиск встроенного chain-файла в ресурсах сборки и локальной директории"""
     search_dirs = []
     if hasattr(sys, '_MEIPASS'):
         search_dirs.extend([
@@ -140,7 +140,7 @@ class LiftOverZApp:
         self._on_preset_selected()
 
     def _build_ui(self):
-        self.main_frame = ttk.Padding(self.root, padding=12)
+        self.main_frame = ttk.Frame(self.root, padding=12)
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
         top_bar = ttk.Frame(self.main_frame)
