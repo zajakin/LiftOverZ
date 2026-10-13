@@ -6,23 +6,41 @@ on:
       - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
-    name: Build LiftOverZ on ${{ matrix.os }}
+    name: Build on ${{ matrix.os }} (${{ matrix.arch_label }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         include:
+          # Windows 11 / 10
           - os: windows-latest
+            arch_label: x64
             asset_name: LiftOverZ-windows.exe
             out_binary: dist/LiftOverZ.exe
             data_sep: ';'
+
+          # Linux 64-bit
           - os: ubuntu-latest
+            arch_label: x64
             asset_name: LiftOverZ-linux
             out_binary: dist/LiftOverZ
             data_sep: ':'
+
+          # macOS Apple Silicon (M1 / M2 / M3 / M4)
           - os: macos-latest
-            asset_name: LiftOverZ-macos
+            arch_label: arm64-apple-silicon
+            asset_name: LiftOverZ-macos-arm64
+            out_binary: dist/LiftOverZ
+            data_sep: ':'
+
+          # macOS Intel (x86_64)
+          - os: macos-13
+            arch_label: x86_64-intel
+            asset_name: LiftOverZ-macos-intel
             out_binary: dist/LiftOverZ
             data_sep: ':'
 
@@ -35,7 +53,8 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install system dependencies (Linux)
+      # Системные пакеты Tkinter для Linux
+      - name: Install Tkinter on Linux
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
@@ -46,19 +65,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Build Standalone Executable
+      - name: Build Standalone Executable with PyInstaller
         run: |
-          pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
+          pyinstaller --onefile --noconsole \
+            --add-data "locales${{ matrix.data_sep }}locales" \
+            --collect-all tkinterdnd2 \
+            --collect-all pyliftover \
+            --name LiftOverZ liftover_gui.py
 
       - name: Rename executable for Release
         shell: bash
         run: |
           mv ${{ matrix.out_binary }} ${{ matrix.asset_name }}
 
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload Build Artifact
+        uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.asset_name }}
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+          retention-days: 1
+
+  # Финальный шаг публикации релиза (выполняется 1 раз со всеми файлами)
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_assets
+          merge-multiple: true
+
+      - name: Create GitHub Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
