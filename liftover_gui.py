@@ -64,6 +64,29 @@ def parse_dnd_path(event_data):
     return path
 
 
+def find_preset_chain(filename):
+    """Ищет встроенный chain-файл в папках chains или changes"""
+    search_dirs = []
+    if hasattr(sys, '_MEIPASS'):
+        search_dirs.extend([
+            os.path.join(sys._MEIPASS, "chains"),
+            os.path.join(sys._MEIPASS, "changes"),
+            sys._MEIPASS
+        ])
+    base_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+    search_dirs.extend([
+        os.path.join(base_dir, "chains"),
+        os.path.join(base_dir, "changes"),
+        base_dir
+    ])
+
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def open_file_read(filepath):
     return gzip.open(filepath, 'rt', encoding='utf-8', errors='replace') if filepath.endswith('.gz') else open(filepath, 'rt', encoding='utf-8', errors='replace')
 
@@ -82,12 +105,25 @@ class LiftOverZApp:
         "MAF (.maf)": "maf"
     }
 
+    CHAIN_PRESETS = [
+        ("preset_custom", None),
+        ("preset_hg19_to_hg38", "hg19ToHg38.over.chain.gz"),
+        ("preset_hg38_to_hg19", "hg38ToHg19.over.chain.gz"),
+        ("preset_hg38_to_hs1", "hg38ToHs1.over.chain.gz"),
+        ("preset_hs1_to_hg38", "hs1ToHg38.over.chain.gz"),
+        ("preset_hg19_to_hs1", "hg19ToHs1.over.chain.gz"),
+        ("preset_hs1_to_hg19", "hs1ToHg19.over.chain.gz"),
+        ("preset_mm10_to_mm39", "mm10ToMm39.over.chain.gz"),
+        ("preset_mm39_to_mm10", "mm39ToMm10.over.chain.gz"),
+        ("preset_mm9_to_mm10", "mm9ToMm10.over.chain.gz")
+    ]
+
     def __init__(self, root):
         self.root = root
         self.i18n = I18nManager()
 
-        self.root.geometry("740x680")
-        self.root.minsize(680, 600)
+        self.root.geometry("760x720")
+        self.root.minsize(700, 640)
 
         self.input_path = tk.StringVar()
         self.chain_path = tk.StringVar()
@@ -100,6 +136,8 @@ class LiftOverZApp:
 
         self._build_ui()
         self._update_ui_texts()
+        self.cb_presets.current(1)
+        self._on_preset_selected()
 
     def _build_ui(self):
         self.main_frame = ttk.Padding(self.root, padding=12)
@@ -142,21 +180,27 @@ class LiftOverZApp:
         self.ent_inp.drop_target_register(DND_FILES)
         self.ent_inp.dnd_bind('<<Drop>>', self._on_drop_input)
 
+        self.lbl_chain_preset = ttk.Label(self.files_frame)
+        self.lbl_chain_preset.grid(row=1, column=0, sticky="w", pady=3)
+        self.cb_presets = ttk.Combobox(self.files_frame, state="readonly")
+        self.cb_presets.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=3)
+        self.cb_presets.bind("<<ComboboxSelected>>", self._on_preset_selected)
+
         self.lbl_chain = ttk.Label(self.files_frame)
-        self.lbl_chain.grid(row=1, column=0, sticky="w", pady=3)
+        self.lbl_chain.grid(row=2, column=0, sticky="w", pady=3)
         self.ent_chain = ttk.Entry(self.files_frame, textvariable=self.chain_path)
-        self.ent_chain.grid(row=1, column=1, sticky="ew", padx=5, pady=3)
+        self.ent_chain.grid(row=2, column=1, sticky="ew", padx=5, pady=3)
         self.btn_browse_chain = ttk.Button(self.files_frame, command=self._browse_chain)
-        self.btn_browse_chain.grid(row=1, column=2, pady=3)
+        self.btn_browse_chain.grid(row=2, column=2, pady=3)
         self.ent_chain.drop_target_register(DND_FILES)
-        self.ent_chain.dnd_bind('<<Drop>>', lambda e: self.chain_path.set(parse_dnd_path(e.data)))
+        self.ent_chain.dnd_bind('<<Drop>>', self._on_drop_chain)
 
         self.lbl_output = ttk.Label(self.files_frame)
-        self.lbl_output.grid(row=2, column=0, sticky="w", pady=3)
+        self.lbl_output.grid(row=3, column=0, sticky="w", pady=3)
         self.ent_out = ttk.Entry(self.files_frame, textvariable=self.out_path)
-        self.ent_out.grid(row=2, column=1, sticky="ew", padx=5, pady=3)
+        self.ent_out.grid(row=3, column=1, sticky="ew", padx=5, pady=3)
         self.btn_save_out = ttk.Button(self.files_frame, command=self._save_out_dialog)
-        self.btn_save_out.grid(row=2, column=2, pady=3)
+        self.btn_save_out.grid(row=3, column=2, pady=3)
 
         self.opts_frame = ttk.LabelFrame(self.main_frame, padding=8)
         self.opts_frame.pack(fill=tk.X, pady=(0, 8))
@@ -183,7 +227,7 @@ class LiftOverZApp:
         self.log_frame = ttk.LabelFrame(self.main_frame, padding=5)
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
 
-        self.log_area = tk.Text(self.log_frame, height=10, state='disabled', wrap='word')
+        self.log_area = tk.Text(self.log_frame, height=9, state='disabled', wrap='word')
         self.log_area.pack(fill=tk.BOTH, expand=True)
 
     def _update_ui_texts(self):
@@ -195,6 +239,7 @@ class LiftOverZApp:
         self.log_frame.config(text=self.i18n.t("log_title"))
 
         self.lbl_input.config(text=self.i18n.t("lbl_input"))
+        self.lbl_chain_preset.config(text=self.i18n.t("lbl_chain_preset"))
         self.lbl_chain.config(text=self.i18n.t("lbl_chain"))
         self.lbl_output.config(text=self.i18n.t("lbl_output"))
         self.lbl_chrom_map.config(text=self.i18n.t("lbl_chrom_map"))
@@ -207,15 +252,37 @@ class LiftOverZApp:
         self.btn_save_out.config(text=self.i18n.t("btn_save_as"))
         self.btn_run.config(text=self.i18n.t("btn_run"))
 
+        curr_idx = self.cb_presets.current()
+        preset_labels = [self.i18n.t(item[0]) for item in self.CHAIN_PRESETS]
+        self.cb_presets.config(values=preset_labels)
+        if curr_idx >= 0:
+            self.cb_presets.current(curr_idx)
+
     def _on_language_changed(self, event=None):
         code = self.lang_cb.get().split('(')[-1].rstrip(')').strip()
         self.i18n.set_language(code)
         self._update_ui_texts()
 
+    def _on_preset_selected(self, event=None):
+        idx = self.cb_presets.current()
+        if idx <= 0:
+            return
+        _, filename = self.CHAIN_PRESETS[idx]
+        actual_path = find_preset_chain(filename)
+        if actual_path:
+            self.chain_path.set(actual_path)
+        else:
+            self.chain_path.set(os.path.join("chains", filename))
+
     def _on_drop_input(self, event):
         path = parse_dnd_path(event.data)
         self.input_path.set(path)
         self._auto_detect_format(path)
+
+    def _on_drop_chain(self, event):
+        path = parse_dnd_path(event.data)
+        self.chain_path.set(path)
+        self.cb_presets.current(0)
 
     def _browse_input(self):
         filename = filedialog.askopenfilename(
@@ -233,6 +300,7 @@ class LiftOverZApp:
         )
         if filename:
             self.chain_path.set(filename)
+            self.cb_presets.current(0)
 
     def _browse_chrom_map(self):
         filename = filedialog.askopenfilename(

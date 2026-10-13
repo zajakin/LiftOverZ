@@ -19,28 +19,24 @@ jobs:
     strategy:
       matrix:
         include:
-          # Windows 11 / 10 (x64)
           - os: windows-latest
             arch_label: x64
             asset_name: LiftOverZ-windows.exe
             out_binary: dist/LiftOverZ.exe
             data_sep: ';'
 
-          # Linux (x64)
           - os: ubuntu-latest
             arch_label: x64
             asset_name: LiftOverZ-linux
             out_binary: dist/LiftOverZ
             data_sep: ':'
 
-          # macOS Apple Silicon (M1, M2, M3, M4 - arm64)
           - os: macos-latest
             arch_label: arm64-apple-silicon
             asset_name: LiftOverZ-macos-arm64
             out_binary: dist/LiftOverZ
             data_sep: ':'
 
-          # macOS Intel (x86_64)
           - os: macos-15-intel
             arch_label: x86_64-intel
             asset_name: LiftOverZ-macos-intel
@@ -56,7 +52,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Установка системного Tkinter для Linux
       - name: Install Tkinter on Linux
         if: runner.os == 'Linux'
         run: |
@@ -68,9 +63,17 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      # Сборка одной строкой без разрывов строк обратными слэшами
+      # Синхронизация имени папки chains / changes перед упаковкой
+      - name: Prepare Chains Folder
+        run: |
+          if [ -d "changes" ] && [ ! -d "chains" ]; then
+            cp -r changes chains
+          elif [ -d "chains" ] && [ ! -d "changes" ]; then
+            cp -r chains changes
+          fi
+
       - name: Build Standalone Executable with PyInstaller
-        run: pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
+        run: pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --add-data "chains${{ matrix.data_sep }}chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
 
       - name: Rename executable for Release
         run: mv ${{ matrix.out_binary }} ${{ matrix.asset_name }}
@@ -82,7 +85,6 @@ jobs:
           path: ${{ matrix.asset_name }}
           retention-days: 1
 
-  # Публикация релиза со всеми 4 бинарниками
   release:
     name: Publish GitHub Release
     needs: build
