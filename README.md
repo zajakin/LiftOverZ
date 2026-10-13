@@ -51,7 +51,6 @@ Official UCSC chain files frequently fail to map variants on mitochondrial DNA (
 **LiftOverZ bundles custom, gap-free mitochondrial alignments based on Broad Institute / GATK standards:**
 * **hg38 / hs1 ⇄ hg19:** A clean, two-block continuous alignment that precisely bridges positions 0–3106 (1:1 match) and 3107–end (+2 / -2 bp shift) without any gaps.
 * **hg38 ⇄ hs1 (T2T):** A pure 1:1 identity alignment across all 16,569 bp, removing fragmented UCSC chain splits.
-* *Result: 100% of valid mitochondrial variants map cleanly without being discarded to `.unmapped`.*
 
 ---
 
@@ -71,17 +70,12 @@ Official UCSC chain files frequently fail to map variants on mitochondrial DNA (
 ### Quick Start
 
 1. Go to the **[Releases](../../releases)** tab of this repository.
-2. Download the binary for your platform:
-   * **Windows 11 / 10:** `LiftOverZ-windows.exe`
-   * **Linux:** `LiftOverZ-linux` (run `chmod +x LiftOverZ-linux` before launch)
-   * **macOS (M1/M2/M3/M4):** `LiftOverZ-macos-arm64`
-   * **macOS (Intel):** `LiftOverZ-macos-intel`
+2. Download the binary for your platform.
 3. Launch the application.
 4. Drag & drop your genomic data file into **Input File**.
 5. Select the desired conversion from the **Built-in Chain Preset** dropdown (or drop your own custom chain file).
 6. Confirm the destination in **Save Result To**.
 7. Click **🚀 Run LiftOverZ**.
-8. Use **🔄 Reset** to clear paths and state when processing consecutive files.
 
 ---
 
@@ -111,7 +105,7 @@ MT             chrM
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/LiftOverZ.git
+git clone https://github.com/zajakin/LiftOverZ.git
 cd LiftOverZ
 
 # Install dependencies
@@ -179,7 +173,6 @@ pyinstaller --onefile --noconsole \
 **Во встроенных цепочках LiftOverZ митохондрия заменена на непрерывные блоки по стандартам Broad Institute / GATK:**
 * **hg38 / hs1 ⇄ hg19:** Непрерывное выравнивание из двух блоков: 0–3106 (совпадение 1-в-1) и 3107–конец (строгий сдвиг на +2 / -2 п.н. без единого разрыва).
 * **hg38 ⇄ hs1 (T2T):** Строгое непрерывное совпадение 1-в-1 по всей длине 16 569 п.н.
-* *Результат: 100% митохондриальных вариантов переносятся успешно без потери данных.*
 
 ---
 
@@ -199,17 +192,12 @@ pyinstaller --onefile --noconsole \
 ### Быстрый старт
 
 1. Перейдите во вкладку **[Releases](../../releases)** репозитория.
-2. Скачайте файл под свою операционную систему:
-   * **Windows 11 / 10:** `LiftOverZ-windows.exe`
-   * **Linux:** `LiftOverZ-linux` (выполните `chmod +x LiftOverZ-linux` перед запуском)
-   * **macOS (M1/M2/M3/M4):** `LiftOverZ-macos-arm64`
-   * **macOS (Intel):** `LiftOverZ-macos-intel`
+2. Скачайте файл под свою операционную систему.
 3. Запустите программу.
 4. Перетащите геномный файл в поле **Входной файл**.
 5. Выберите нужное направление в списке **Встроенный пресет Chain** (или укажите свой chain-файл).
 6. Проверьте путь сохранения в поле **Сохранить результат**.
 7. Нажмите **🚀 Запустить LiftOverZ**.
-8. При необходимости используйте кнопку **🔄 Сброс** для очистки путей и лога перед обработкой следующего файла.
 
 ---
 
@@ -239,7 +227,7 @@ MT             chrM
 
 ```bash
 # Клонирование репозитория
-git clone https://github.com/your-username/LiftOverZ.git
+git clone https://github.com/zajakin/LiftOverZ.git
 cd LiftOverZ
 
 # Установка зависимостей
@@ -249,11 +237,6 @@ pip install -r requirements.txt
 python liftover_gui.py
 
 # Сборка автономного бинарника
-pyinstaller --onefile --noconsole \
-  --add-data "locales:locales" \
-  --add-data "chains:chains" \
-  --collect-all tkinterdnd2 \
-  --collect-all pyliftover \
-  --name LiftOverZ liftover_gui.py
+pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
 ```
 *(В Windows замените разделители двоеточия `:locales` и `:chains` на точку с запятой `;locales` и `;chains`)*
