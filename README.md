@@ -1,6 +1,10 @@
-# LiftOverZ
+# LiftOverZ - A fast, standalone, cross-platform graphical tool for lifting over genomic coordinates across genome assembly builds.
 
-[English](#english) | [Русский](#русский)
+![Python](https://img.shields.io/badge/Language-Python-blue.svg)
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)
+![License](https://img.shields.io/badge/License-MIT-orange.svg)
+
+**Languages: [English](#english) | [Русский](#русский)
 
 ---
 
@@ -10,6 +14,12 @@
 **LiftOverZ** is a fast, standalone, cross-platform graphical tool designed for lifting over genomic coordinates across genome assembly builds (e.g., hg19/GRCh37, hg38/GRCh38, T2T-CHM13v2, and mouse builds).
 
 It requires **no installation**, runs as a single portable executable, includes **pre-bundled, gap-corrected UCSC chain files**, supports **Drag & Drop**, handles compressed files (`.gz`) out of the box, preserves chromosome naming styles (UCSC vs. Ensembl/NCBI), and features hot-swappable language support.
+
+---
+
+## Screenshot
+
+![Screenshot LiftOverZ](Screenshot.png)
 
 ---
 
@@ -115,12 +125,7 @@ pip install -r requirements.txt
 python liftover_gui.py
 
 # Build a standalone binary
-pyinstaller --onefile --noconsole \
-  --add-data "locales:locales" \
-  --add-data "chains:chains" \
-  --collect-all tkinterdnd2 \
-  --collect-all pyliftover \
-  --name LiftOverZ liftover_gui.py
+pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
 ```
 *(On Windows, replace `:locales` and `:chains` with `;locales` and `;chains` in `--add-data`)*
 
