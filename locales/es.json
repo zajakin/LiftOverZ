@@ -31,6 +31,7 @@
   "log_loading_chain": "Cargando archivo chain: {path}...",
   "log_processing": "Procesando archivo: {path}...",
   "log_progress": "Procesados: {total} registros (Mapeados: {mapped}, Omitidos: {unmapped})...",
+  "log_sorting": "Ordenando {count} registros mapeados por coordenadas...",
   "log_finished": "=== ¡Completado con éxito! ===",
   "log_summary": "Resumen: Total: {total} | Mapeados: {mapped} | Omitidos: {unmapped}",
   "preset_custom": "Archivo Chain personalizado (seleccionar o arrastrar)...",

@@ -48,14 +48,28 @@ def detect_system_language():
     return "en"
 
 
+def chrom_sort_key(chrom):
+    """Канонический порядок сортировки хромосом: 1..22, X, Y, M/MT, затем остальные контиги"""
+    c = chrom.lower()
+    if c.startswith('chr'):
+        c = c[3:]
+    if c.isdigit():
+        return (0, int(c), "")
+    special = {'x': 23, 'y': 24, 'm': 25, 'mt': 25}
+    if c in special:
+        return (1, special[c], "")
+    return (2, 0, c)
+
+
 class I18nManager:
-    """Менеджер локализации без хардкода строк в коде с fallback на английский"""
+    """Менеджер локализации без захардкоженных языковых строк с fallback на en.json"""
     def __init__(self, default_lang=None):
         self.languages = {}
         self.translations = {}
         self.fallback_translations = {}
         self._load_available_languages()
 
+        # Базовый английский словарь из файла en.json для fallback
         if "en" in self.languages:
             try:
                 with open(self.languages["en"]["path"], 'r', encoding='utf-8') as f:
@@ -414,7 +428,6 @@ class LiftOverZApp:
         elif ext.endswith('.maf'):
             self.selected_format.set("MAF (.maf)")
 
-        # Формирование уникального имени выходного файла
         if filename.endswith('.gz'):
             base, ext_inner = os.path.splitext(filename[:-3])
             ext_name = ext_inner + '.gz'
@@ -521,6 +534,9 @@ class LiftOverZApp:
             mapped = 0
             unmapped = 0
 
+            # Буфер для сортировки записей перед записью на диск
+            converted_records = []
+
             with open_file_read(in_file) as f_in, open_file_write(out_file) as f_out:
                 if cmd_type in ['vcf', 'gvcf']:
                     for line in f_in:
@@ -534,9 +550,11 @@ class LiftOverZApp:
                         chrom, pos = parts[0], int(parts[1]) - 1
                         conv = self._lift_coord(lo, chrom, pos, cmap, auto_chr)
                         if conv:
-                            parts[0] = self._format_output_chrom(chrom, conv[0])
-                            parts[1] = str(conv[1] + 1)
-                            f_out.write('\t'.join(parts) + '\n')
+                            target_c = self._format_output_chrom(chrom, conv[0])
+                            new_pos = conv[1] + 1
+                            parts[0] = target_c
+                            parts[1] = str(new_pos)
+                            converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
                             mapped += 1
                         else:
                             unmapped += 1
@@ -544,6 +562,13 @@ class LiftOverZApp:
                                 f_unm.write(line)
                         if total % 25000 == 0:
                             self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
+
+                    if converted_records:
+                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
+                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1]))
+                        for rec in converted_records:
+                            f_out.write(rec[2])
+                        converted_records.clear()
 
                 elif cmd_type == 'bed':
                     for line in f_in:
@@ -558,12 +583,13 @@ class LiftOverZApp:
                         conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
                         conv_e = self._lift_coord(lo, chrom, end - 1, cmap, auto_chr)
                         if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                            parts[0] = self._format_output_chrom(chrom, conv_s[0])
+                            target_c = self._format_output_chrom(chrom, conv_s[0])
                             new_s = min(conv_s[1], conv_e[1])
                             new_e = max(conv_s[1], conv_e[1]) + 1
+                            parts[0] = target_c
                             parts[1] = str(new_s)
                             parts[2] = str(new_e)
-                            f_out.write('\t'.join(parts) + '\n')
+                            converted_records.append((target_c, new_s, new_e, '\t'.join(parts) + '\n'))
                             mapped += 1
                         else:
                             unmapped += 1
@@ -571,6 +597,13 @@ class LiftOverZApp:
                                 f_unm.write(line)
                         if total % 25000 == 0:
                             self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
+
+                    if converted_records:
+                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
+                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1], x[2]))
+                        for rec in converted_records:
+                            f_out.write(rec[3])
+                        converted_records.clear()
 
                 elif cmd_type == 'gff':
                     for line in f_in:
@@ -585,10 +618,13 @@ class LiftOverZApp:
                         conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
                         conv_e = self._lift_coord(lo, chrom, end, cmap, auto_chr)
                         if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                            parts[0] = self._format_output_chrom(chrom, conv_s[0])
-                            parts[3] = str(min(conv_s[1], conv_e[1]) + 1)
-                            parts[4] = str(max(conv_s[1], conv_e[1]) + 1)
-                            f_out.write('\t'.join(parts) + '\n')
+                            target_c = self._format_output_chrom(chrom, conv_s[0])
+                            new_s = min(conv_s[1], conv_e[1]) + 1
+                            new_e = max(conv_s[1], conv_e[1]) + 1
+                            parts[0] = target_c
+                            parts[3] = str(new_s)
+                            parts[4] = str(new_e)
+                            converted_records.append((target_c, new_s, new_e, '\t'.join(parts) + '\n'))
                             mapped += 1
                         else:
                             unmapped += 1
@@ -596,6 +632,13 @@ class LiftOverZApp:
                                 f_unm.write(line)
                         if total % 25000 == 0:
                             self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
+
+                    if converted_records:
+                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
+                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1], x[2]))
+                        for rec in converted_records:
+                            f_out.write(rec[3])
+                        converted_records.clear()
 
                 elif cmd_type == 'wig':
                     curr_chrom = None
@@ -655,10 +698,13 @@ class LiftOverZApp:
                             conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
                             conv_e = self._lift_coord(lo, chrom, end, cmap, auto_chr)
                             if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                                parts[chr_idx] = self._format_output_chrom(chrom, conv_s[0])
-                                parts[start_idx] = str(min(conv_s[1], conv_e[1]) + 1)
-                                parts[end_idx] = str(max(conv_s[1], conv_e[1]) + 1)
-                                f_out.write('\t'.join(parts) + '\n')
+                                target_c = self._format_output_chrom(chrom, conv_s[0])
+                                new_s = min(conv_s[1], conv_e[1]) + 1
+                                new_e = max(conv_s[1], conv_e[1]) + 1
+                                parts[chr_idx] = target_c
+                                parts[start_idx] = str(new_s)
+                                parts[end_idx] = str(new_e)
+                                converted_records.append((target_c, new_s, new_e, '\t'.join(parts) + '\n'))
                                 mapped += 1
                             else:
                                 unmapped += 1
@@ -666,6 +712,13 @@ class LiftOverZApp:
                                     f_unm.write(line)
                         if total % 25000 == 0:
                             self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
+
+                    if converted_records:
+                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
+                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1], x[2]))
+                        for rec in converted_records:
+                            f_out.write(rec[3])
+                        converted_records.clear()
 
             if f_unm:
                 f_unm.close()

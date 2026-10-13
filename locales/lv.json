@@ -31,6 +31,7 @@
   "log_loading_chain": "Ielādē chain failu: {path}...",
   "log_processing": "Apstrādā failu: {path}...",
   "log_progress": "Apstrādāti: {total} ieraksti (Veiksmīgi: {mapped}, Izlaisti: {unmapped})...",
+  "log_sorting": "Kārto {count} pārnestos ierakstus pēc koordinātām...",
   "log_finished": "=== Veiksmīgi pabeigts! ===",
   "log_summary": "Kopsavilkums: Kopā: {total} | Pārnesti: {mapped} | Izlaisti: {unmapped}",
   "preset_custom": "Pielāgots Chain fails (izvēlieties vai ievelciet)...",

@@ -31,6 +31,7 @@
   "log_loading_chain": "Lade Chain-Datei: {path}...",
   "log_processing": "Verarbeite Datei: {path}...",
   "log_progress": "Verarbeitet: {total} Zeilen (Erfolgreich: {mapped}, Übersprungen: {unmapped})...",
+  "log_sorting": "Sortiere {count} zugeordnete Einträge nach Koordinaten...",
   "log_finished": "=== Erfolgreich abgeschlossen! ===",
   "log_summary": "Zusammenfassung: Gesamt: {total} | Zugeordnet: {mapped} | Übersprungen: {unmapped}",
   "preset_custom": "Benutzerdefinierte Chain-Datei (auswählen oder ablegen)...",

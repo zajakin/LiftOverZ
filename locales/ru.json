@@ -31,6 +31,7 @@
   "log_loading_chain": "Загрузка chain-файла: {path}...",
   "log_processing": "Обработка файла: {path}...",
   "log_progress": "Обработано: {total} строк (Успешно: {mapped}, Пропущено: {unmapped})...",
+  "log_sorting": "Сортировка {count} перенесённых записей по координатам...",
   "log_finished": "=== Завершено успешно! ===",
   "log_summary": "Итог: Всего: {total} | Перенесено: {mapped} | Пропущено: {unmapped}",
   "preset_custom": "Пользовательский файл (выберите или перетащите)...",

@@ -31,6 +31,7 @@
   "log_loading_chain": "Loading chain file: {path}...",
   "log_processing": "Processing file: {path}...",
   "log_progress": "Processed: {total} records (Mapped: {mapped}, Unmapped: {unmapped})...",
+  "log_sorting": "Sorting {count} mapped records by genomic coordinates...",
   "log_finished": "=== Completed Successfully! ===",
   "log_summary": "Summary: Total: {total} | Mapped: {mapped} | Unmapped: {unmapped}",
   "preset_custom": "Custom Chain File (choose or drag & drop)...",

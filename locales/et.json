@@ -31,6 +31,7 @@
   "log_loading_chain": "Chain-faili laadimine: {path}...",
   "log_processing": "Faili töötlemine: {path}...",
   "log_progress": "Töödeldud: {total} kirjet (Üle kantud: {mapped}, Vahele jäetud: {unmapped})...",
+  "log_sorting": "Sorditakse {count} teisendatud kirjet koordinaatide järgi...",
   "log_finished": "=== Edukalt lõpetatud! ===",
   "log_summary": "Kokkuvõte: Kokku: {total} | Üle kantud: {mapped} | Vahele jäetud: {unmapped}",
   "preset_custom": "Kohandatud Chain-fail (vali või lohista)...",

@@ -31,6 +31,7 @@
   "log_loading_chain": "Įkeliamas chain failas: {path}...",
   "log_processing": "Apdorojamas failas: {path}...",
   "log_progress": "Apdorota: {total} įrašų (Perkelta: {mapped}, Praleista: {unmapped})...",
+  "log_sorting": "Rūšiuojami {count} perkelti įrašai pagal koordinates...",
   "log_finished": "=== Sėkmingai baigta! ===",
   "log_summary": "Santrauka: Iš viso: {total} | Perkelta: {mapped} | Praleista: {unmapped}",
   "preset_custom": "Pasirinktinis Chain failas (pasirinkite arba vilkite)...",
