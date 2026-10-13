@@ -3,6 +3,7 @@ import sys
 import glob
 import json
 import gzip
+import locale
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -10,13 +11,55 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 from pyliftover import LiftOver
 
 
+def detect_system_language():
+    """Определяет двухбуквенный код языка интерфейса операционной системы"""
+    # 1. Windows: точное определение через API ядра
+    if sys.platform.startswith('win'):
+        try:
+            import ctypes
+            lcid = ctypes.windll.kernel32.GetUserDefaultUILanguage()
+            loc_name = locale.windows_locale.get(lcid)
+            if loc_name:
+                code = loc_name.split('_')[0].lower()
+                if len(code) == 2:
+                    return code
+        except Exception:
+            pass
+
+    # 2. Linux / macOS / POSIX: переменные окружения
+    for env_var in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
+        val = os.environ.get(env_var)
+        if val:
+            first_entry = val.split(':')[0].split('.')[0]
+            code = first_entry.split('_')[0].lower()
+            if len(code) == 2:
+                return code
+
+    # 3. Стандартная локаль Python
+    try:
+        loc = locale.getlocale()[0]
+        if loc:
+            code = loc.split('_')[0].lower()
+            if len(code) == 2:
+                return code
+    except Exception:
+        pass
+
+    return "en"
+
+
 class I18nManager:
-    def __init__(self, default_lang="ru"):
+    def __init__(self, default_lang=None):
         self.languages = {}
-        self.current_lang = default_lang
         self.translations = {}
         self._load_available_languages()
-        self.set_language(default_lang if default_lang in self.languages else "en")
+
+        if default_lang is None:
+            sys_lang = detect_system_language()
+            default_lang = sys_lang if sys_lang in self.languages else "en"
+
+        self.current_lang = default_lang if default_lang in self.languages else "en"
+        self.set_language(self.current_lang)
 
     def _get_locales_dirs(self):
         dirs = []
@@ -151,7 +194,7 @@ class LiftOverZApp:
 
         lang_options = [f"{info['name']} ({code})" for code, info in self.i18n.languages.items()]
         self.lang_cb = ttk.Combobox(top_bar, values=lang_options, state="readonly", width=18)
-        current_name = self.i18n.languages.get(self.i18n.current_lang, {}).get("name", "Русский")
+        current_name = self.i18n.languages.get(self.i18n.current_lang, {}).get("name", "English")
         self.lang_cb.set(f"{current_name} ({self.i18n.current_lang})")
         self.lang_cb.pack(side=tk.LEFT)
         self.lang_cb.bind("<<ComboboxSelected>>", self._on_language_changed)
@@ -394,6 +437,27 @@ class LiftOverZApp:
                 return res[0]
         return None
 
+    @staticmethod
+    def _format_output_chrom(orig_chrom, target_chrom):
+        """
+        Сохраняет исходный стиль именования хромосом входного файла.
+        Если входной файл был без префикса 'chr' (например, Ensembl/NCBI: 1, 2, MT),
+        то результат конверсии (UCSC 'chr1', 'chrM') возвращается без 'chr' (1, 2, MT).
+        """
+        orig_has_chr = orig_chrom.lower().startswith('chr')
+        target_has_chr = target_chrom.lower().startswith('chr')
+
+        if not orig_has_chr and target_has_chr:
+            stripped = target_chrom[3:]
+            if stripped.upper() == 'M' and orig_chrom.upper() == 'MT':
+                return 'MT'
+            return stripped
+        elif orig_has_chr and not target_has_chr:
+            if target_chrom.upper() == 'MT':
+                return 'chrM'
+            return 'chr' + target_chrom
+        return target_chrom
+
     def _run_conversion(self, cmd_type, chain_file, in_file, out_file):
         try:
             self.log(self.i18n.t("log_started", fmt=cmd_type.upper()))
@@ -425,7 +489,8 @@ class LiftOverZApp:
                         chrom, pos = parts[0], int(parts[1]) - 1
                         conv = self._lift_coord(lo, chrom, pos, cmap, auto_chr)
                         if conv:
-                            parts[0] = conv[0]
+                            # Сохраняем стиль префикса хромосомы входного файла
+                            parts[0] = self._format_output_chrom(chrom, conv[0])
                             parts[1] = str(conv[1] + 1)
                             f_out.write('\t'.join(parts) + '\n')
                             mapped += 1
@@ -449,7 +514,7 @@ class LiftOverZApp:
                         conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
                         conv_e = self._lift_coord(lo, chrom, end - 1, cmap, auto_chr)
                         if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                            parts[0] = conv_s[0]
+                            parts[0] = self._format_output_chrom(chrom, conv_s[0])
                             new_s = min(conv_s[1], conv_e[1])
                             new_e = max(conv_s[1], conv_e[1]) + 1
                             parts[1] = str(new_s)
@@ -476,7 +541,7 @@ class LiftOverZApp:
                         conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
                         conv_e = self._lift_coord(lo, chrom, end, cmap, auto_chr)
                         if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                            parts[0] = conv_s[0]
+                            parts[0] = self._format_output_chrom(chrom, conv_s[0])
                             parts[3] = str(min(conv_s[1], conv_e[1]) + 1)
                             parts[4] = str(max(conv_s[1], conv_e[1]) + 1)
                             f_out.write('\t'.join(parts) + '\n')
@@ -546,7 +611,7 @@ class LiftOverZApp:
                             conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
                             conv_e = self._lift_coord(lo, chrom, end, cmap, auto_chr)
                             if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                                parts[chr_idx] = conv_s[0]
+                                parts[chr_idx] = self._format_output_chrom(chrom, conv_s[0])
                                 parts[start_idx] = str(min(conv_s[1], conv_e[1]) + 1)
                                 parts[end_idx] = str(max(conv_s[1], conv_e[1]) + 1)
                                 f_out.write('\t'.join(parts) + '\n')
