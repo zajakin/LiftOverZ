@@ -27,7 +27,6 @@
   "err_no_input": "Please select a valid input file.",
   "err_no_chain": "Please select a valid Chain file or pick a preset.",
   "err_no_output": "Please specify output file destination.",
-  "err_pyfaidx_missing": "The 'pyfaidx' package is required for FASTA validation. Please install it: pip install pyfaidx",
   "success_title": "Success",
   "success_message": "Liftover completed!\nMapped: {mapped} / {total}\nUnmapped: {unmapped}",
   "success_message_fasta": "Liftover completed!\nMapped: {mapped} / {total}\nSwapped (REF/ALT): {swapped}\nRejected (REF mismatch): {rejected}\nUnmapped: {unmapped}",

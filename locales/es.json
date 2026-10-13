@@ -27,7 +27,6 @@
   "err_no_input": "Especifique un archivo de entrada válido.",
   "err_no_chain": "Especifique un archivo Chain válido o seleccione un preajuste.",
   "err_no_output": "Especifique una ruta para guardar el resultado.",
-  "err_pyfaidx_missing": "Se requiere el paquete 'pyfaidx' para la validación de FASTA. Instálelo con: pip install pyfaidx",
   "success_title": "Éxito",
   "success_message": "¡Conversión completada con éxito!\nMapeados: {mapped} / {total}\nOmitidos: {unmapped}",
   "success_message_fasta": "¡Conversión completada!\nMapeados: {mapped} / {total}\nIntercambiados (REF/ALT): {swapped}\nRechazados (discrepancia REF): {rejected}\nOmitidos: {unmapped}",

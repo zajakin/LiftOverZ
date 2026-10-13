@@ -27,7 +27,6 @@
   "err_no_input": "Lūdzu, norādiet derīgu ievades failu.",
   "err_no_chain": "Lūdzu, norādiet derīgu Chain failu vai izvēlieties iestatījumu.",
   "err_no_output": "Lūdzu, norādiet ceļu rezultāta saglabāšanai.",
-  "err_pyfaidx_missing": "FASTA validācijai nepieciešama pakotne 'pyfaidx'. Lūdzu, instalējiet: pip install pyfaidx",
   "success_title": "Veiksmīgi",
   "success_message": "Konvertēšana veiksmīgi pabeigta!\nPārnesti: {mapped} / {total}\nIzlaisti: {unmapped}",
   "success_message_fasta": "Konvertēšana veiksmīgi pabeigta!\nPārnesti: {mapped} / {total}\nApgriezti (REF/ALT): {swapped}\nNoraidīti (REF nesakritība): {rejected}\nIzlaisti: {unmapped}",

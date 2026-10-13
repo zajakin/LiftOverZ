@@ -27,7 +27,6 @@
   "err_no_input": "Bitte geben Sie eine gültige Eingabedatei an.",
   "err_no_chain": "Bitte geben Sie eine gültige Chain-Datei an oder wählen Sie eine Voreinstellung.",
   "err_no_output": "Bitte geben Sie einen Zielpfad zum Speichern an.",
-  "err_pyfaidx_missing": "Das Paket 'pyfaidx' wird für die FASTA-Validierung benötigt. Bitte installieren: pip install pyfaidx",
   "success_title": "Erfolg",
   "success_message": "Konvertierung erfolgreich abgeschlossen!\nZugeordnet: {mapped} / {total}\nÜbersprungen: {unmapped}",
   "success_message_fasta": "Konvertierung abgeschlossen!\nZugeordnet: {mapped} / {total}\nGetauscht (REF/ALT): {swapped}\nAbgewiesen (REF-Fehlabgleich): {rejected}\nÜbersprungen: {unmapped}",

@@ -27,7 +27,6 @@
   "err_no_input": "Nurodykite galiojantį įvesties failą.",
   "err_no_chain": "Nurodykite galiojantį Chain failą arba pasirinkite šabloną.",
   "err_no_output": "Nurodykite vietą rezultatui išsaugoti.",
-  "err_pyfaidx_missing": "FASTA patvirtinimui reikalingas 'pyfaidx' paketas. Įdiekite: pip install pyfaidx",
   "success_title": "Pavyko",
   "success_message": "Konvertavimas sėkmingai baigtas!\nPerkelta: {mapped} / {total}\nPraleista: {unmapped}",
   "success_message_fasta": "Konvertavimas baigtas!\nPerkelta: {mapped} / {total}\nPakeista (REF/ALT): {swapped}\nAtmesta (REF nesutapimas): {rejected}\nPraleista: {unmapped}",

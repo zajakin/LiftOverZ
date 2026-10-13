@@ -27,7 +27,6 @@
   "err_no_input": "Palun määrake kehtiv sisendfail.",
   "err_no_chain": "Palun määrake kehtiv Chain-fail või valige eelseadistus.",
   "err_no_output": "Palun määrake tulemuse salvestamise asukoht.",
-  "err_pyfaidx_missing": "FASTA valideerimiseks on vajalik 'pyfaidx' pakett. Installige see: pip install pyfaidx",
   "success_title": "Õnnestus",
   "success_message": "Teisendamine edukalt lõpetatud!\nÜle kantud: {mapped} / {total}\nVahele jäetud: {unmapped}",
   "success_message_fasta": "Teisendamine lõpetatud!\nÜle kantud: {mapped} / {total}\nVahetatud (REF/ALT): {swapped}\nTagasi lükatud (REF ebakõla): {rejected}\nVahele jäetud: {unmapped}",

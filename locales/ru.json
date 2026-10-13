@@ -27,7 +27,6 @@
   "err_no_input": "Укажите существующий входной файл.",
   "err_no_chain": "Укажите существующий Chain файл или выберите пресет.",
   "err_no_output": "Укажите путь для сохранения результата.",
-  "err_pyfaidx_missing": "Для валидации по FASTA требуется библиотека 'pyfaidx'. Установите её: pip install pyfaidx",
   "success_title": "Успех",
   "success_message": "Конвертация успешно завершена!\nПеренесено: {mapped} / {total}\nПропущено: {unmapped}",
   "success_message_fasta": "Конвертация успешно завершена!\nПеренесено: {mapped} / {total}\nЗаменено (REF/ALT): {swapped}\nОтклонено (несовпадение REF): {rejected}\nПропущено: {unmapped}",

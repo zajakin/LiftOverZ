@@ -9,12 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pyliftover import LiftOver
-
-try:
-    from pyfaidx import Fasta
-    HAS_PYFAIDX = True
-except ImportError:
-    HAS_PYFAIDX = False
+from pyfaidx import Fasta
 
 
 def detect_system_language():
@@ -556,9 +551,6 @@ class LiftOverZApp:
         if fasta_file and not os.path.exists(fasta_file):
             messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("dialog_select_fasta"))
             return
-        if fasta_file and not HAS_PYFAIDX:
-            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_pyfaidx_missing"))
-            return
         if not out:
             messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_no_output"))
             return
@@ -629,7 +621,7 @@ class LiftOverZApp:
             lo = LiftOver(chain_file)
 
             fasta_obj = None
-            if fasta_file and HAS_PYFAIDX:
+            if fasta_file:
                 self.log(self.i18n.t("log_loading_fasta", path=fasta_file))
                 fasta_obj = Fasta(fasta_file, as_raw=True, sequence_always_upper=True, read_ahead=100000)
 
@@ -693,14 +685,14 @@ class LiftOverZApp:
                         new_pos = conv[1] + 1
                         strand = conv[2] if len(conv) > 2 else '+'
 
-                        # 1. Режим без FASTA: стандартный перенос
+                        # 1. Быстрый режим без FASTA
                         if not fasta_obj:
                             parts[0] = target_c
                             parts[1] = str(new_pos)
                             converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
                             mapped += 1
                         else:
-                            # 2. Режим с валидацией по FASTA
+                            # 2. Строгий режим с валидацией по FASTA
                             strand_flipped = False
                             if strand == '-':
                                 cur_ref = rev_comp_allele(ref)
