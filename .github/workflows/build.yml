@@ -64,7 +64,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Build Standalone Executable with PyInstaller
-        run: pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --add-data "chains${{ matrix.data_sep }}chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
+        run: pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --add-data "chains${{ matrix.data_sep }}chains" --collect-all tkinterdnd2 --collect-all pyliftover --collect-all pyfaidx --name LiftOverZ liftover_gui.py
 
       - name: Rename executable for Release
         run: mv ${{ matrix.out_binary }} ${{ matrix.asset_name }}

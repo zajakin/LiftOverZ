@@ -1,3 +1,4 @@
 pyliftover
 tkinterdnd2
+pyfaidx
 pyinstaller

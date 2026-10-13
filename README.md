@@ -13,7 +13,7 @@
 
 **LiftOverZ** is a fast, standalone, cross-platform graphical tool designed for lifting over genomic coordinates across genome assembly builds (e.g., hg19/GRCh37, hg38/GRCh38, T2T-CHM13v2, and mouse builds).
 
-It requires **no installation**, runs as a single portable executable, includes **pre-bundled, gap-corrected UCSC chain files**, supports **Drag & Drop**, handles compressed files (`.gz`) out of the box, preserves chromosome naming styles (UCSC vs. Ensembl/NCBI), and features hot-swappable language support.
+It requires **no installation**, runs as a single portable executable, includes **pre-bundled, gap-corrected UCSC chain files**, supports **Drag & Drop**, handles compressed files (`.gz`) out of the box, preserves chromosome naming styles (UCSC vs. Ensembl/NCBI), supports **optional target FASTA reference validation**, and features hot-swappable multilingual support.
 
 ---
 
@@ -34,7 +34,11 @@ It requires **no installation**, runs as a single portable executable, includes 
 * **Pre-bundled & Gap-Corrected Chain Presets:** Popular human and mouse assembly chains are embedded directly into the binary. Crucially, human mitochondrial chains (`chrM`) are patched to eliminate official UCSC alignment gaps.
 * **Chromosome Naming & Header Integrity:** Automatically preserves chromosome prefix style (e.g. Ensembl `1`, `MT` stay `1`, `MT` rather than forcing UCSC `chr1`, `chrM`), preventing VCF header inconsistencies.
 * **Automatic Coordinate Sorting:** Re-orders output entries by chromosome and genomic coordinate so that results can be immediately indexed with `tabix` or loaded into genome browsers without requiring external sorting tools.
-* **Intuitive GUI with Drag & Drop & Reset:** Drop input files, custom chain files, or mapping tables straight into the interface. Includes a one-click Reset button to safely process multiple files consecutively.
+* **Optional Target FASTA Reference Validation:** Provide a target reference genome FASTA file (`pyfaidx`) to enable full biological validation for VCF files:
+  * **Strand Flips:** Automatically reverse-complements `REF`/`ALT` on inverted alignments (`-` strand) and tags records with `LIFTOVER_REVERSE_COMPLEMENTED`.
+  * **REF/ALT Swapping:** When the reference allele in the new build switches to the variant allele, alleles are swapped (`REF` $\leftrightarrow$ `ALT`), diploid genotypes (`GT`, `AD`, `PL`) are recalculated, and entries are flagged with `LIFTOVER_SWAPPED`.
+  * **Mismatch Audit:** True reference mismatches are cleanly diverted into a `.rejected.vcf` file with detailed annotations (`LIFTOVER_REJECT_REASON=MismatchedRefAllele`).
+* **Intuitive GUI with Drag & Drop & Reset:** Drop input files, chain files, target FASTA, or mapping tables straight into the interface. Includes a one-click Reset button to safely process multiple files consecutively.
 * **Broad Genomic Format Support:** Automatically detects and converts 6 major genomic formats (VCF, gVCF, BED, GFF/GTF, Wiggle, MAF).
 * **Transparent Gzip Compression:** Direct read and write support for `.gz` archives without pre-decompression.
 * **Unmapped Records Audit:** Exports unmapped records into a dedicated `.unmapped` file for downstream verification.
@@ -65,14 +69,19 @@ Official UCSC chain files frequently fail to map variants on mitochondrial DNA (
 
 ---
 
-### Biological Considerations for VCF Coordinate Liftover
+### Dual Mode: Fast Mathematical Mapping vs. Full FASTA Validation
 
-When converting VCF files across reference assemblies, keep the following genomic nuances in mind:
+LiftOverZ provides two flexible operating modes for VCF liftover:
 
-* **Automatic Sorting:** Liftover can alter the relative order of genomic loci due to local inversions or structural shifts. LiftOverZ sorts output records chronologically by coordinate to maintain compatibility with `tabix`, `bcftools`, and IGV.
-* **Reference Allele (REF) Changes:** VCF files only document polymorphic or called variant sites, not the invariant background genome. Between major assembly releases (e.g. hg19 to hg38), individual reference bases may have been corrected or altered. Coordinate-based liftover transforms position coordinates and retains recorded alleles; it does not query full multi-gigabyte reference FASTA files to verify whether the original `REF` nucleotide matches the target genome build.
-* **Strand Flips & Inversions:** In regions aligned to the opposite strand (`-`), coordinate liftover maps loci to their target locations, but strictly speaking nucleotide alleles (REF/ALT) on inverted blocks correspond to the reverse complement.
-* **Recommendation:** For clinical or mission-critical variant annotation pipelines that require strict REF validation against a target FASTA genome, running a reference concordance check (e.g. `bcftools +fixref` or Picard `LiftoverVcf` with a target FASTA) is advised after coordinate conversion.
+1. **Fast Mode (Target FASTA left empty):**
+   * Instantaneous mathematical coordinate translation and automatic chromosome sorting.
+   * Zero disk or memory overhead; does not require downloading multi-gigabyte reference genomes.
+   * Ideal for targeted sequencing, SNP arrays, mitochondrial analyses, and non-critical research queries.
+2. **Strict Mode (Target FASTA provided):**
+   * Rapidly queries target nucleotide sequence using indexed FASTA (`pyfaidx`).
+   * Validates target `REF` sequence against the new reference build.
+   * Manages strand inversion (reverse complement) and allele flips (REF/ALT swap) for clinical and research rigor.
+   * Discards incompatible variants into a valid, annotated `.rejected.vcf` file.
 
 ---
 
@@ -80,7 +89,7 @@ When converting VCF files across reference assemblies, keep the following genomi
 
 | Format | Extensions | Coordinate System | Notes |
 | :--- | :--- | :--- | :--- |
-| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Retains headers, variant metadata, and contig prefix style |
+| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Retains headers, variant metadata, and contig prefix style; supports FASTA validation |
 | **gVCF** | `.gvcf`, `.gvcf.gz` | 1-based | Accurately handles non-variant block entries |
 | **BED / BEDGraph** | `.bed`, `.bedgraph` | 0-based start, 1-based end | Updates interval spans cleanly |
 | **GFF / GTF / GFF3** | `.gff`, `.gtf`, `.gff3` | 1-based inclusive | Updates feature start and end bounds |
@@ -96,13 +105,16 @@ When converting VCF files across reference assemblies, keep the following genomi
 3. Launch the application.
 4. Drag & drop your genomic data file into **Input File**.
 5. Select the desired conversion from the **Built-in Chain Preset** dropdown (or drop your own custom chain file).
-6. Confirm the destination in **Save Result To**.
-7. Click **🚀 Run LiftOverZ**.
+6. *(Optional)* Select or drop a target reference FASTA (e.g., `hg38.fa`) into **Target Reference FASTA** for biological REF validation.
+7. Confirm the destination in **Save Result To**.
+8. Click **🚀 Run LiftOverZ**.
+9. Use **🔄 Reset** to clear paths and state when processing consecutive files.
 
 ---
 
 ### Options & Configuration
 
+* **Target Reference FASTA (Optional):** Path to target assembly FASTA file (`.fa`, `.fasta`, `.fa.gz`). Automatically generates `.fai` index on first run if missing.
 * **Auto-match 'chr' prefix:** When checked, reconciles naming variations between NCBI/Ensembl (`1`, `2`, `MT`) and UCSC (`chr1`, `chr2`, `chrM`) while retaining original input prefix format in the output.
 * **Save unmapped records:** Generates a `.unmapped` file containing lines that could not be lifted over.
 * **Chromosome Mapping File (Optional):** Whitespace-delimited text file mapping custom contig names:
@@ -138,6 +150,7 @@ python liftover_gui.py
 
 # Build a standalone binary
 pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chains:chains" --collect-all tkinterdnd2 --collect-all pyliftover --name LiftOverZ liftover_gui.py
+  --collect-all pyfaidx \
 ```
 *(On Windows, replace `:locales` and `:chains` with `;locales` and `;chains` in `--add-data`)*
 
@@ -148,7 +161,13 @@ pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chain
 
 **LiftOverZ** — это быстрый автономный кроссплатформенный графический инструмент для переноса (liftover) геномных координат между сборками референсного генома (hg19/GRCh37, hg38/GRCh38, T2T-CHM13v2, а также сборками генома мыши).
 
-Программа **не требует установки**, поставляется в виде одного портативного исполняемого файла, содержит **встроенные исправленные chain-файлы UCSC (без пропусков в митохондрии)**, поддерживает **Drag & Drop**, напрямую работает со сжатыми архивами (`.gz`), сохраняет нотацию хромосом (Ensembl против UCSC) и поддерживает 7 языков с автоопределением языка ОС.
+Программа **не требует установки**, поставляется в виде одного портативного исполняемого файла, содержит **встроенные исправленные chain-файлы UCSC (без пропусков в митохондрии)**, поддерживает **Drag & Drop**, напрямую работает со сжатыми архивами (`.gz`), сохраняет нотацию хромосом (Ensembl против UCSC), автоматически сортирует координаты, поддерживает **опциональную строгую валидацию по целевой FASTA** и включает 7 языков интерфейса с автоопределением языка ОС.
+
+---
+
+## Скриншот
+
+![Screenshot LiftOverZ](Screenshot.png)
 
 ---
 
@@ -163,7 +182,11 @@ pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chain
 * **Встроенные и исправленные цепочки UCSC:** Все популярные цепочки для человека и мыши уже включены в программу. Цепочки человеческой митохондрии (`chrM`) модифицированы для устранения официальных дефектов выравнивания UCSC.
 * **Сохранение стиля префиксов и валидности заголовков VCF:** Если исходный файл использует нотацию Ensembl/NCBI (`1`, `2`, `MT`), результат сохраняет её без принудительного добавления `chr`, сохраняя валидность строк `##contig` в заголовке VCF.
 * **Автоматическая сортировка координат:** Записи в выходном файле упорядочиваются по хромосоме и координатам, поэтому результат можно сразу индексировать с помощью `tabix` или загружать в IGV без внешних утилит сортировки.
-* **Интерфейс с Drag & Drop и кнопкой Reset:** Перетаскивайте входные файлы, сторонние chain-файлы и карты хромосом мышью. Кнопка «Сброс» позволяет быстро очистить состояние при пакетной обработке файлов.
+* **Опциональная биологическая валидация по целевой FASTA:** Подключение референсного файла новой сборки (`pyfaidx`) позволяет выполнять полную валидацию VCF:
+  * **Инверсия цепей (Strand Flip):** Если блок цепочки находится на отрицательной цепи (`-`), аллели `REF`/`ALT` автоматически переводятся в обратный комплемент с добавлением тега `LIFTOVER_REVERSE_COMPLEMENTED`.
+  * **Замена аллелей (REF/ALT Swap):** Если референс в новой сборке сменился на мутантный аллель, программа производит замену `REF` $\leftrightarrow$ `ALT`, корректно инвертирует генотипы `GT` (и поля `AD`/`PL`) и маркирует запись тегом `LIFTOVER_SWAPPED`.
+  * **Отбраковка несовпадений:** Строки, где референс не сошёлся с новой сборкой, выводятся в отдельный валидный файл `.rejected.vcf` с указанием причины `LIFTOVER_REJECT_REASON=MismatchedRefAllele`.
+* **Интерфейс с Drag & Drop и кнопкой Reset:** Перетаскивайте входные файлы, сторонние chain-файлы, целевую FASTA и карты хромосом мышью. Кнопка «Сброс» позволяет быстро очистить состояние при пакетной обработке файлов.
 * **Поддержка 6 основных геномных форматов:** Автоматическое распознавание VCF, gVCF, BED, GFF/GTF, Wiggle, MAF.
 * **Прозрачная работа с Gzip:** Чтение и запись архивов `.gz` на лету без предварительной распаковки.
 * **Аудит неперенесённых строк:** Запись пропущенных строк в файл `.unmapped` для последующего контроля.
@@ -194,14 +217,17 @@ pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chain
 
 ---
 
-### Биологические особенности переноса VCF-файлов
+### Два режима работы: Быстрый перенос vs. Строгая валидация по FASTA
 
-При переносе VCF-файлов между различными версиями генома важно учитывать следующие особенности:
-
-* **Автоматическая сортировка:** Локальные инверсии и структурные перестройки могут нарушить порядок следования строк в результирующем файле. LiftOverZ автоматически упорядочивает строки по возрастанию координат, гарантируя совместимость с `tabix`, `bcftools` и IGV.
-* **Изменение референсного аллеля (REF):** VCF-файл содержит информацию только о выявленных полиморфных точках, но не хранит последовательность окружающего референса. Между сборками (например, hg19 и hg38) нуклеотид в конкретной позиции мог быть исправлен или изменён. Алгоритм LiftOver переносит физические координаты и переносит указанные аллели, но не валидирует колонку `REF` по многогигабайтному геномному FASTA-файлу новой сборки.
-* **Инвертированные цепи (Strand Flips):** Если участок генома в новой сборке картирован на противоположную цепь (`-`), координаты переносятся корректно, однако в строгом биоинформатическом смысле аллели на обратной цепи требуют комплементарной инверсии.
-* **Рекомендация:** Для клинических пайплайнов глубокой аннотации, критичных к строгому совпадению REF с референсом новой сборки, после переноса рекомендуется верификация аллелей через `bcftools +fixref` или Picard `LiftoverVcf` с подключением целевого FASTA-файла.
+1. **Быстрый режим (поле Target FASTA оставлено пустым):**
+   * Мгновенный перенос координат по цепочкам и автоматическая сортировка.
+   * Не требует загрузки многогигабайтных референсов и сторонних баз.
+   * Оптимален для таргетных панелей, микрочипов, митохондрий и рутинных исследовательских задач.
+2. **Строгий режим (указан файл Target FASTA):**
+   * Мгновенное чтение нуклеотидов новой сборки по индексу FASTA (`pyfaidx`).
+   * Полная проверка совпадения референсного нуклеотида новой сборки с полем `REF`.
+   * Корректная обработка инверсий (обратный комплемент) и смены референса (REF/ALT Swap).
+   * Вывод биологически несовместимых вариантов в файл `.rejected.vcf`.
 
 ---
 
@@ -209,7 +235,7 @@ pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chain
 
 | Формат | Расширения | Система координат | Примечание |
 | :--- | :--- | :--- | :--- |
-| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Сохраняет заголовок, аннотации и стиль префиксов хромосом |
+| **VCF** | `.vcf`, `.vcf.gz` | 1-based | Сохраняет заголовок, аннотации и стиль префиксов хромосом; поддерживает проверку по FASTA |
 | **gVCF** | `.gvcf`, `.gvcf.gz` | 1-based | Корректно переносит невариантные интервалы |
 | **BED / BEDGraph** | `.bed`, `.bedgraph` | 0-based старт, 1-based конец | Сохраняет длину и границы интервалов |
 | **GFF / GTF / GFF3** | `.gff`, `.gtf`, `.gff3` | 1-based включительно | Обновляет начальные и конечные координаты |
@@ -225,13 +251,16 @@ pyinstaller --onefile --noconsole --add-data "locales:locales" --add-data "chain
 3. Запустите программу.
 4. Перетащите геномный файл в поле **Входной файл**.
 5. Выберите нужное направление в списке **Встроенный пресет Chain** (или укажите свой chain-файл).
-6. Проверьте путь сохранения в поле **Сохранить результат**.
-7. Нажмите **🚀 Запустить LiftOverZ**.
+6. *(Опционально)* Укажите файл референса целевого генома (например, `hg38.fa`) в поле **Целевой референс FASTA** для биологической валидации REF.
+7. Проверьте путь сохранения в поле **Сохранить результат**.
+8. Нажмите **🚀 Запустить LiftOverZ**.
+9. При необходимости используйте кнопку **🔄 Сброс** для очистки путей и лога перед обработкой следующего файла.
 
 ---
 
 ### Настройки и параметры
 
+* **Целевой референс FASTA (Опционально):** Путь к FASTA-файлу целевой сборки (`.fa`, `.fasta`, `.fa.gz`). При первом запуске автоматически создаёт `.fai` индекс, если он отсутствует.
 * **Авто-сопоставление префикса 'chr':** Устраняет различия между нотациями NCBI/Ensembl (`1`, `2`, `MT`) и UCSC (`chr1`, `chr2`, `chrM`), сохраняя исходный стиль в итоговом файле.
 * **Сохранять неперенесённые записи:** Создаёт файл `.unmapped` со строками, для которых в цепочке переноса не нашлось пары.
 * **Файл соответствия хромосом (Опционально):** Текстовый файл с соответствиями нестандартных имен (разделитель — пробел или табуляция):

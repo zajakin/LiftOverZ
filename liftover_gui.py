@@ -10,6 +10,12 @@ from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pyliftover import LiftOver
 
+try:
+    from pyfaidx import Fasta
+    HAS_PYFAIDX = True
+except ImportError:
+    HAS_PYFAIDX = False
+
 
 def detect_system_language():
     """Определяет двухбуквенный код языка интерфейса операционной системы"""
@@ -61,6 +67,73 @@ def chrom_sort_key(chrom):
     return (2, 0, c)
 
 
+REV_COMP_TRANS = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+
+
+def rev_comp_allele(allele):
+    """Обратный комплемент нуклеотидов с пропуском спец-символов VCF"""
+    if allele.startswith('<') or allele == '*' or allele == '.':
+        return allele
+    return allele.translate(REV_COMP_TRANS)[::-1]
+
+
+def get_fasta_seq(fasta_obj, chrom, start_0, end_0):
+    """Извлекает срез нуклеотидов из индекса FASTA с авто-сопоставлением имен хромосом"""
+    try:
+        if chrom in fasta_obj:
+            return str(fasta_obj[chrom][start_0:end_0]).upper()
+        if chrom.startswith("chr") and chrom[3:] in fasta_obj:
+            return str(fasta_obj[chrom[3:]][start_0:end_0]).upper()
+        if not chrom.startswith("chr") and ("chr" + chrom) in fasta_obj:
+            return str(fasta_obj["chr" + chrom][start_0:end_0]).upper()
+        if chrom.upper() in ("MT", "CHRM", "M", "CHRMT"):
+            for m_alias in ("chrM", "MT", "M", "chrMT"):
+                if m_alias in fasta_obj:
+                    return str(fasta_obj[m_alias][start_0:end_0]).upper()
+    except Exception:
+        pass
+    return None
+
+
+def swap_genotypes_and_format(format_str, sample_str):
+    """Инвертирует GT (0<->1), а также пересчитывает PL и AD при замене REF/ALT"""
+    if not format_str or not sample_str or sample_str == '.':
+        return sample_str
+    fmt_keys = format_str.split(':')
+    sm_vals = sample_str.split(':')
+
+    gt_idx = fmt_keys.index('GT') if 'GT' in fmt_keys else -1
+    pl_idx = fmt_keys.index('PL') if 'PL' in fmt_keys else -1
+    ad_idx = fmt_keys.index('AD') if 'AD' in fmt_keys else -1
+
+    if gt_idx != -1 and gt_idx < len(sm_vals):
+        gt_val = sm_vals[gt_idx]
+        sep = '/' if '/' in gt_val else ('|' if '|' in gt_val else None)
+        if sep:
+            alleles = gt_val.split(sep)
+            new_alleles = []
+            for a in alleles:
+                if a == '0':
+                    new_alleles.append('1')
+                elif a == '1':
+                    new_alleles.append('0')
+                else:
+                    new_alleles.append(a)
+            sm_vals[gt_idx] = sep.join(new_alleles)
+
+    if pl_idx != -1 and pl_idx < len(sm_vals):
+        pls = sm_vals[pl_idx].split(',')
+        if len(pls) == 3:
+            sm_vals[pl_idx] = f"{pls[2]},{pls[1]},{pls[0]}"
+
+    if ad_idx != -1 and ad_idx < len(sm_vals):
+        ads = sm_vals[ad_idx].split(',')
+        if len(ads) == 2:
+            sm_vals[ad_idx] = f"{ads[1]},{ads[0]}"
+
+    return ':'.join(sm_vals)
+
+
 class I18nManager:
     """Менеджер локализации без захардкоженных языковых строк с fallback на en.json"""
     def __init__(self, default_lang=None):
@@ -69,7 +142,6 @@ class I18nManager:
         self.fallback_translations = {}
         self._load_available_languages()
 
-        # Базовый английский словарь из файла en.json для fallback
         if "en" in self.languages:
             try:
                 with open(self.languages["en"]["path"], 'r', encoding='utf-8') as f:
@@ -186,11 +258,12 @@ class LiftOverZApp:
         self.root = root
         self.i18n = I18nManager()
 
-        self.root.geometry("760x730")
-        self.root.minsize(700, 650)
+        self.root.geometry("780x760")
+        self.root.minsize(720, 680)
 
         self.input_path = tk.StringVar()
         self.chain_path = tk.StringVar()
+        self.target_fasta_path = tk.StringVar()
         self.out_path = tk.StringVar()
         self.chrom_map_path = tk.StringVar()
         self.selected_format = tk.StringVar(value=list(self.FORMAT_MAPPING.keys())[0])
@@ -235,6 +308,7 @@ class LiftOverZApp:
         self.files_frame.pack(fill=tk.X, pady=(0, 8))
         self.files_frame.columnconfigure(1, weight=1)
 
+        # 1. Входной файл
         self.lbl_input = ttk.Label(self.files_frame)
         self.lbl_input.grid(row=0, column=0, sticky="w", pady=3)
         self.ent_inp = ttk.Entry(self.files_frame, textvariable=self.input_path)
@@ -244,12 +318,14 @@ class LiftOverZApp:
         self.ent_inp.drop_target_register(DND_FILES)
         self.ent_inp.dnd_bind('<<Drop>>', self._on_drop_input)
 
+        # 2. Пресет Chain
         self.lbl_chain_preset = ttk.Label(self.files_frame)
         self.lbl_chain_preset.grid(row=1, column=0, sticky="w", pady=3)
         self.cb_presets = ttk.Combobox(self.files_frame, state="readonly")
         self.cb_presets.grid(row=1, column=1, columnspan=2, sticky="ew", padx=5, pady=3)
         self.cb_presets.bind("<<ComboboxSelected>>", self._on_preset_selected)
 
+        # 3. Активный Chain файл
         self.lbl_chain = ttk.Label(self.files_frame)
         self.lbl_chain.grid(row=2, column=0, sticky="w", pady=3)
         self.ent_chain = ttk.Entry(self.files_frame, textvariable=self.chain_path)
@@ -259,12 +335,23 @@ class LiftOverZApp:
         self.ent_chain.drop_target_register(DND_FILES)
         self.ent_chain.dnd_bind('<<Drop>>', self._on_drop_chain)
 
+        # 4. Целевой референс FASTA (Опционально)
+        self.lbl_target_fasta = ttk.Label(self.files_frame)
+        self.lbl_target_fasta.grid(row=3, column=0, sticky="w", pady=3)
+        self.ent_fasta = ttk.Entry(self.files_frame, textvariable=self.target_fasta_path)
+        self.ent_fasta.grid(row=3, column=1, sticky="ew", padx=5, pady=3)
+        self.btn_browse_fasta = ttk.Button(self.files_frame, command=self._browse_fasta)
+        self.btn_browse_fasta.grid(row=3, column=2, pady=3)
+        self.ent_fasta.drop_target_register(DND_FILES)
+        self.ent_fasta.dnd_bind('<<Drop>>', lambda e: self.target_fasta_path.set(parse_dnd_path(e.data)))
+
+        # 5. Выходной файл
         self.lbl_output = ttk.Label(self.files_frame)
-        self.lbl_output.grid(row=3, column=0, sticky="w", pady=3)
+        self.lbl_output.grid(row=4, column=0, sticky="w", pady=3)
         self.ent_out = ttk.Entry(self.files_frame, textvariable=self.out_path)
-        self.ent_out.grid(row=3, column=1, sticky="ew", padx=5, pady=3)
+        self.ent_out.grid(row=4, column=1, sticky="ew", padx=5, pady=3)
         self.btn_save_out = ttk.Button(self.files_frame, command=self._save_out_dialog)
-        self.btn_save_out.grid(row=3, column=2, pady=3)
+        self.btn_save_out.grid(row=4, column=2, pady=3)
 
         self.opts_frame = ttk.LabelFrame(self.main_frame, padding=8)
         self.opts_frame.pack(fill=tk.X, pady=(0, 8))
@@ -313,6 +400,7 @@ class LiftOverZApp:
         self.lbl_input.config(text=self.i18n.t("lbl_input"))
         self.lbl_chain_preset.config(text=self.i18n.t("lbl_chain_preset"))
         self.lbl_chain.config(text=self.i18n.t("lbl_chain"))
+        self.lbl_target_fasta.config(text=self.i18n.t("lbl_target_fasta"))
         self.lbl_output.config(text=self.i18n.t("lbl_output"))
         self.lbl_chrom_map.config(text=self.i18n.t("lbl_chrom_map"))
         self.chk_auto_chr_w.config(text=self.i18n.t("chk_auto_chr"))
@@ -320,6 +408,7 @@ class LiftOverZApp:
 
         self.btn_browse_inp.config(text=self.i18n.t("btn_browse"))
         self.btn_browse_chain.config(text=self.i18n.t("btn_browse"))
+        self.btn_browse_fasta.config(text=self.i18n.t("btn_browse"))
         self.btn_browse_map.config(text=self.i18n.t("btn_browse"))
         self.btn_save_out.config(text=self.i18n.t("btn_save_as"))
         self.btn_run.config(text=self.i18n.t("btn_run"))
@@ -334,6 +423,8 @@ class LiftOverZApp:
     def _reset_all(self):
         """Полная очистка полей и логов"""
         self.input_path.set("")
+        self.chain_path.set("")
+        self.target_fasta_path.set("")
         self.out_path.set("")
         self.chrom_map_path.set("")
         self.selected_format.set(list(self.FORMAT_MAPPING.keys())[0])
@@ -390,6 +481,14 @@ class LiftOverZApp:
             self.chain_path.set(filename)
             self.cb_presets.current(0)
 
+    def _browse_fasta(self):
+        filename = filedialog.askopenfilename(
+            title=self.i18n.t("dialog_select_fasta"),
+            filetypes=[("FASTA Files", "*.fa *.fasta *.fa.gz *.fasta.gz"), ("All Files", "*.*")]
+        )
+        if filename:
+            self.target_fasta_path.set(filename)
+
     def _browse_chrom_map(self):
         filename = filedialog.askopenfilename(
             title=self.i18n.t("dialog_select_map"),
@@ -444,6 +543,7 @@ class LiftOverZApp:
     def _start_processing(self):
         inp = self.input_path.get()
         chain = self.chain_path.get()
+        fasta_file = self.target_fasta_path.get().strip()
         out = self.out_path.get()
         cmd_type = self.FORMAT_MAPPING[self.selected_format.get()]
 
@@ -453,13 +553,19 @@ class LiftOverZApp:
         if not chain or not os.path.exists(chain):
             messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_no_chain"))
             return
+        if fasta_file and not os.path.exists(fasta_file):
+            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("dialog_select_fasta"))
+            return
+        if fasta_file and not HAS_PYFAIDX:
+            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_pyfaidx_missing"))
+            return
         if not out:
             messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_no_output"))
             return
 
         self.btn_run.config(state='disabled')
         self.btn_reset.config(state='disabled')
-        threading.Thread(target=self._run_conversion, args=(cmd_type, chain, inp, out), daemon=True).start()
+        threading.Thread(target=self._run_conversion, args=(cmd_type, chain, fasta_file, inp, out), daemon=True).start()
 
     def _load_chrom_map(self):
         m_path = self.chrom_map_path.get()
@@ -516,11 +622,16 @@ class LiftOverZApp:
             return 'chr' + target_chrom
         return target_chrom
 
-    def _run_conversion(self, cmd_type, chain_file, in_file, out_file):
+    def _run_conversion(self, cmd_type, chain_file, fasta_file, in_file, out_file):
         try:
             self.log(self.i18n.t("log_started", fmt=cmd_type.upper()))
             self.log(self.i18n.t("log_loading_chain", path=chain_file))
             lo = LiftOver(chain_file)
+
+            fasta_obj = None
+            if fasta_file and HAS_PYFAIDX:
+                self.log(self.i18n.t("log_loading_fasta", path=fasta_file))
+                fasta_obj = Fasta(fasta_file, as_raw=True, sequence_always_upper=True, read_ahead=100000)
 
             cmap = self._load_chrom_map()
             auto_chr = self.auto_chr.get()
@@ -529,37 +640,131 @@ class LiftOverZApp:
             unm_file = out_file + ".unmapped" if save_unm else None
             f_unm = open_file_write(unm_file) if unm_file else None
 
+            rej_file = (out_file + ".rejected.vcf") if cmd_type in ['vcf', 'gvcf'] else (out_file + ".rejected")
+            f_rej = open_file_write(rej_file) if fasta_obj else None
+
             self.log(self.i18n.t("log_processing", path=in_file))
             total = 0
             mapped = 0
             unmapped = 0
+            swapped = 0
+            rejected = 0
 
-            # Буфер для сортировки записей перед записью на диск
             converted_records = []
 
             with open_file_read(in_file) as f_in, open_file_write(out_file) as f_out:
                 if cmd_type in ['vcf', 'gvcf']:
                     for line in f_in:
-                        if line.startswith('#'):
+                        if line.startswith('##'):
                             f_out.write(line)
+                            if f_rej:
+                                f_rej.write(line)
                             continue
+                        if line.startswith('#CHROM'):
+                            if fasta_obj:
+                                f_out.write('##INFO=<ID=LIFTOVER_SWAPPED,Number=0,Type=Flag,Description="Reference and alternate alleles were swapped during liftover to match target genome reference">\n')
+                                f_out.write('##INFO=<ID=LIFTOVER_REVERSE_COMPLEMENTED,Number=0,Type=Flag,Description="Alleles were reverse-complemented during liftover due to negative strand alignment">\n')
+                                if f_rej:
+                                    f_rej.write('##INFO=<ID=LIFTOVER_REJECT_REASON,Number=1,Type=String,Description="Reason for liftover rejection">\n')
+                            f_out.write(line)
+                            if f_rej:
+                                f_rej.write(line)
+                            continue
+
                         total += 1
                         parts = line.rstrip('\r\n').split('\t')
-                        if len(parts) < 2:
+                        if len(parts) < 5:
                             continue
-                        chrom, pos = parts[0], int(parts[1]) - 1
-                        conv = self._lift_coord(lo, chrom, pos, cmap, auto_chr)
-                        if conv:
-                            target_c = self._format_output_chrom(chrom, conv[0])
-                            new_pos = conv[1] + 1
+
+                        chrom = parts[0]
+                        pos_1 = int(parts[1])
+                        ref = parts[3].upper()
+                        alt_str = parts[4].upper()
+                        alts = alt_str.split(',')
+
+                        conv = self._lift_coord(lo, chrom, pos_1 - 1, cmap, auto_chr)
+                        if not conv:
+                            unmapped += 1
+                            if f_unm:
+                                f_unm.write(line)
+                            continue
+
+                        target_c = self._format_output_chrom(chrom, conv[0])
+                        new_pos = conv[1] + 1
+                        strand = conv[2] if len(conv) > 2 else '+'
+
+                        # 1. Режим без FASTA: стандартный перенос
+                        if not fasta_obj:
                             parts[0] = target_c
                             parts[1] = str(new_pos)
                             converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
                             mapped += 1
                         else:
-                            unmapped += 1
-                            if f_unm:
-                                f_unm.write(line)
+                            # 2. Режим с валидацией по FASTA
+                            strand_flipped = False
+                            if strand == '-':
+                                cur_ref = rev_comp_allele(ref)
+                                cur_alts = [rev_comp_allele(a) for a in alts]
+                                strand_flipped = True
+                            else:
+                                cur_ref = ref
+                                cur_alts = alts
+
+                            fasta_ref = get_fasta_seq(fasta_obj, conv[0], new_pos - 1, new_pos - 1 + len(cur_ref))
+
+                            if fasta_ref is None:
+                                rejected += 1
+                                if f_rej:
+                                    parts_rej = list(parts)
+                                    tag = "LIFTOVER_REJECT_REASON=ContigNotFoundInFasta"
+                                    parts_rej[7] = tag if parts_rej[7] == '.' else parts_rej[7] + ';' + tag
+                                    f_rej.write('\t'.join(parts_rej) + '\n')
+                                continue
+
+                            # Случай 1: Референс совпал
+                            if cur_ref == fasta_ref:
+                                parts[0] = target_c
+                                parts[1] = str(new_pos)
+                                parts[3] = cur_ref
+                                parts[4] = ','.join(cur_alts)
+                                if strand_flipped:
+                                    parts[7] = "LIFTOVER_REVERSE_COMPLEMENTED" if parts[7] == '.' else parts[7] + ";LIFTOVER_REVERSE_COMPLEMENTED"
+                                converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
+                                mapped += 1
+
+                            # Случай 2: Референс сменился на мутантный аллель (Swap REF/ALT)
+                            elif len(cur_alts) == 1 and cur_alts[0] == fasta_ref and len(cur_ref) == len(fasta_ref):
+                                swapped_ref = cur_alts[0]
+                                swapped_alt = cur_ref
+                                parts[0] = target_c
+                                parts[1] = str(new_pos)
+                                parts[3] = swapped_ref
+                                parts[4] = swapped_alt
+
+                                if len(parts) >= 10:
+                                    fmt = parts[8]
+                                    for s_idx in range(9, len(parts)):
+                                        parts[s_idx] = swap_genotypes_and_format(fmt, parts[s_idx])
+
+                                info_tags = ["LIFTOVER_SWAPPED"]
+                                if strand_flipped:
+                                    info_tags.append("LIFTOVER_REVERSE_COMPLEMENTED")
+                                add_info = ';'.join(info_tags)
+                                parts[7] = add_info if parts[7] == '.' else parts[7] + ';' + add_info
+
+                                converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
+                                mapped += 1
+                                swapped += 1
+
+                            # Случай 3: Несовпадение референса (Mismatch)
+                            else:
+                                rejected += 1
+                                if f_rej:
+                                    parts_rej = list(parts)
+                                    tag = "LIFTOVER_REJECT_REASON=MismatchedRefAllele"
+                                    parts_rej[7] = tag if parts_rej[7] == '.' else parts_rej[7] + ';' + tag
+                                    f_rej.write('\t'.join(parts_rej) + '\n')
+
                         if total % 25000 == 0:
                             self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
 
@@ -722,10 +927,22 @@ class LiftOverZApp:
 
             if f_unm:
                 f_unm.close()
+                if unmapped == 0 and os.path.exists(unm_file):
+                    os.remove(unm_file)
 
-            self.log(self.i18n.t("log_summary", total=total, mapped=mapped, unmapped=unmapped))
-            self.log(self.i18n.t("log_finished"))
-            messagebox.showinfo(self.i18n.t("success_title"), self.i18n.t("success_message", mapped=mapped, total=total, unmapped=unmapped))
+            if f_rej:
+                f_rej.close()
+                if rejected == 0 and os.path.exists(rej_file):
+                    os.remove(rej_file)
+
+            if fasta_obj:
+                self.log(self.i18n.t("log_summary_fasta", total=total, mapped=mapped, swapped=swapped, rejected=rejected, unmapped=unmapped))
+                self.log(self.i18n.t("log_finished"))
+                messagebox.showinfo(self.i18n.t("success_title"), self.i18n.t("success_message_fasta", mapped=mapped, total=total, swapped=swapped, rejected=rejected, unmapped=unmapped))
+            else:
+                self.log(self.i18n.t("log_summary", total=total, mapped=mapped, unmapped=unmapped))
+                self.log(self.i18n.t("log_finished"))
+                messagebox.showinfo(self.i18n.t("success_title"), self.i18n.t("success_message", mapped=mapped, total=total, unmapped=unmapped))
 
         except Exception as e:
             self.log(f"ERROR: {str(e)}")
