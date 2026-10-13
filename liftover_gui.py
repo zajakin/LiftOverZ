@@ -13,7 +13,7 @@ from pyliftover import LiftOver
 
 def detect_system_language():
     """Определяет двухбуквенный код языка интерфейса операционной системы"""
-    # 1. Windows: точное определение через API ядра
+    # 1. Windows: чтение системной локали через WinAPI
     if sys.platform.startswith('win'):
         try:
             import ctypes
@@ -26,7 +26,7 @@ def detect_system_language():
         except Exception:
             pass
 
-    # 2. Linux / macOS / POSIX: переменные окружения
+    # 2. Linux / macOS / POSIX: системные переменные окружения
     for env_var in ('LANGUAGE', 'LC_ALL', 'LC_MESSAGES', 'LANG'):
         val = os.environ.get(env_var)
         if val:
@@ -49,10 +49,20 @@ def detect_system_language():
 
 
 class I18nManager:
+    """Универсальный менеджер локализации с каскадным fallback на английский"""
     def __init__(self, default_lang=None):
         self.languages = {}
         self.translations = {}
+        self.fallback_translations = {}
         self._load_available_languages()
+
+        # Загружаем базовый английский словарь для fallback
+        if "en" in self.languages:
+            try:
+                with open(self.languages["en"]["path"], 'r', encoding='utf-8') as f:
+                    self.fallback_translations = json.load(f)
+            except Exception:
+                pass
 
         if default_lang is None:
             sys_lang = detect_system_language()
@@ -91,7 +101,8 @@ class I18nManager:
                 self.translations = {}
 
     def t(self, key, **kwargs):
-        text = self.translations.get(key, key)
+        # 1. Текущий язык -> 2. Английский fallback -> 3. Имя самого ключа
+        text = self.translations.get(key, self.fallback_translations.get(key, key))
         if kwargs:
             try:
                 text = text.format(**kwargs)
@@ -165,8 +176,8 @@ class LiftOverZApp:
         self.root = root
         self.i18n = I18nManager()
 
-        self.root.geometry("760x720")
-        self.root.minsize(700, 640)
+        self.root.geometry("760x730")
+        self.root.minsize(700, 650)
 
         self.input_path = tk.StringVar()
         self.chain_path = tk.StringVar()
@@ -264,8 +275,17 @@ class LiftOverZApp:
         self.chk_save_unm_w = ttk.Checkbutton(self.opts_frame, variable=self.save_unmapped)
         self.chk_save_unm_w.grid(row=2, column=0, columnspan=3, sticky="w", pady=2)
 
-        self.btn_run = ttk.Button(self.main_frame, command=self._start_processing)
-        self.btn_run.pack(fill=tk.X, pady=5, ipady=4)
+        # Панель кнопок: Запуск и Сброс
+        btn_action_frame = ttk.Frame(self.main_frame)
+        btn_action_frame.pack(fill=tk.X, pady=5)
+        btn_action_frame.columnconfigure(0, weight=3)
+        btn_action_frame.columnconfigure(1, weight=1)
+
+        self.btn_run = ttk.Button(btn_action_frame, command=self._start_processing)
+        self.btn_run.grid(row=0, column=0, sticky="ew", padx=(0, 5), ipady=4)
+
+        self.btn_reset = ttk.Button(btn_action_frame, command=self._reset_all)
+        self.btn_reset.grid(row=0, column=1, sticky="ew", ipady=4)
 
         self.log_frame = ttk.LabelFrame(self.main_frame, padding=5)
         self.log_frame.pack(fill=tk.BOTH, expand=True, pady=(5, 0))
@@ -294,12 +314,28 @@ class LiftOverZApp:
         self.btn_browse_map.config(text=self.i18n.t("btn_browse"))
         self.btn_save_out.config(text=self.i18n.t("btn_save_as"))
         self.btn_run.config(text=self.i18n.t("btn_run"))
+        self.btn_reset.config(text=self.i18n.t("btn_reset"))
 
         curr_idx = self.cb_presets.current()
         preset_labels = [self.i18n.t(item[0]) for item in self.CHAIN_PRESETS]
         self.cb_presets.config(values=preset_labels)
         if curr_idx >= 0:
             self.cb_presets.current(curr_idx)
+
+    def _reset_all(self):
+        """Очищает поля, восстанавливает настройки по умолчанию и сбрасывает логи"""
+        self.input_path.set("")
+        self.out_path.set("")
+        self.chrom_map_path.set("")
+        self.selected_format.set(list(self.FORMAT_MAPPING.keys())[0])
+        self.cb_presets.current(1)
+        self._on_preset_selected()
+        self.auto_chr.set(True)
+        self.save_unmapped.set(True)
+
+        self.log_area.config(state='normal')
+        self.log_area.delete('1.0', tk.END)
+        self.log_area.config(state='disabled')
 
     def _on_language_changed(self, event=None):
         code = self.lang_cb.get().split('(')[-1].rstrip(')').strip()
@@ -383,11 +419,13 @@ class LiftOverZApp:
         elif ext.endswith('.maf'):
             self.selected_format.set("MAF (.maf)")
 
-        if not self.out_path.get():
+        # Всегда формируем актуальное имя файла результата при смене входного файла
+        if filename.endswith('.gz'):
+            base, ext_inner = os.path.splitext(filename[:-3])
+            ext_name = ext_inner + '.gz'
+        else:
             base, ext_name = os.path.splitext(filename)
-            if filename.endswith('.gz'):
-                base = base[:-4]
-            self.out_path.set(f"{base}_lifted{ext_name}")
+        self.out_path.set(f"{base}_lifted{ext_name}")
 
     def log(self, text):
         self.log_area.config(state='normal')
@@ -412,6 +450,7 @@ class LiftOverZApp:
             return
 
         self.btn_run.config(state='disabled')
+        self.btn_reset.config(state='disabled')
         threading.Thread(target=self._run_conversion, args=(cmd_type, chain, inp, out), daemon=True).start()
 
     def _load_chrom_map(self):
@@ -430,11 +469,22 @@ class LiftOverZApp:
         res = lo.convert_coordinate(target_chrom, pos_0)
         if res:
             return res[0]
+
         if auto_chr:
+            # 1. Автоматическая обработка митохондрий (MT, chrM, M, chrMT)
+            if target_chrom.upper() in ('MT', 'CHRM', 'M', 'CHRMT'):
+                for m_alias in ('chrM', 'MT', 'M', 'chrMT'):
+                    if m_alias != target_chrom:
+                        res = lo.convert_coordinate(m_alias, pos_0)
+                        if res:
+                            return res[0]
+
+            # 2. Стандартное сопоставление chr <-> non-chr (1 <-> chr1)
             alt_chrom = target_chrom[3:] if target_chrom.startswith('chr') else 'chr' + target_chrom
             res = lo.convert_coordinate(alt_chrom, pos_0)
             if res:
                 return res[0]
+
         return None
 
     @staticmethod
@@ -444,13 +494,20 @@ class LiftOverZApp:
         Если входной файл был без префикса 'chr' (например, Ensembl/NCBI: 1, 2, MT),
         то результат конверсии (UCSC 'chr1', 'chrM') возвращается без 'chr' (1, 2, MT).
         """
+        if orig_chrom.upper() == 'MT':
+            return 'MT'
+        if orig_chrom.lower() == 'chrm':
+            return 'chrM'
+        if orig_chrom.upper() == 'M':
+            return 'M'
+
         orig_has_chr = orig_chrom.lower().startswith('chr')
         target_has_chr = target_chrom.lower().startswith('chr')
 
         if not orig_has_chr and target_has_chr:
             stripped = target_chrom[3:]
-            if stripped.upper() == 'M' and orig_chrom.upper() == 'MT':
-                return 'MT'
+            if stripped.upper() == 'M':
+                return 'MT' if orig_chrom.upper() == 'MT' else 'M'
             return stripped
         elif orig_has_chr and not target_has_chr:
             if target_chrom.upper() == 'MT':
@@ -489,7 +546,6 @@ class LiftOverZApp:
                         chrom, pos = parts[0], int(parts[1]) - 1
                         conv = self._lift_coord(lo, chrom, pos, cmap, auto_chr)
                         if conv:
-                            # Сохраняем стиль префикса хромосомы входного файла
                             parts[0] = self._format_output_chrom(chrom, conv[0])
                             parts[1] = str(conv[1] + 1)
                             f_out.write('\t'.join(parts) + '\n')
@@ -635,6 +691,7 @@ class LiftOverZApp:
             messagebox.showerror(self.i18n.t("err_title"), str(e))
         finally:
             self.btn_run.config(state='normal')
+            self.btn_reset.config(state='normal')
 
 
 if __name__ == "__main__":

@@ -15,6 +15,7 @@
   "btn_browse": "Обзор...",
   "btn_save_as": "Сохранить как...",
   "btn_run": "🚀 Запустить LiftOverZ",
+  "btn_reset": "🔄 Сброс",
   "log_title": " Журнал выполнения ",
   "dialog_select_input": "Выберите входной файл",
   "dialog_select_chain": "Выберите Chain файл",

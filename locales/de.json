@@ -15,6 +15,7 @@
   "btn_browse": "Durchsuchen...",
   "btn_save_as": "Speichern unter...",
   "btn_run": "🚀 LiftOverZ starten",
+  "btn_reset": "🔄 Zurücksetzen",
   "log_title": " Ausführungsprotokoll ",
   "dialog_select_input": "Genomische Eingabedatei auswählen",
   "dialog_select_chain": "Chain-Datei auswählen",
