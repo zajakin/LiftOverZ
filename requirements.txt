@@ -1,5 +1,3 @@
-CrossMap
-pybigtools
+pyliftover
 tkinterdnd2
 pyinstaller
-numpy
