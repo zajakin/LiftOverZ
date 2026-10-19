@@ -1,16 +1,29 @@
 import os
+import re
 import sys
 import glob
 import json
 import gzip
+import zlib
+import heapq
+import queue
+import struct
 import locale
+import tempfile
 import threading
+import functools
+import contextlib
+from collections import namedtuple
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pyliftover import LiftOver
 from pyfaidx import Fasta
 
+
+# =============================================================================
+#  Вспомогательные функции
+# =============================================================================
 
 def detect_system_language():
     """Определяет двухбуквенный код языка интерфейса операционной системы"""
@@ -49,6 +62,7 @@ def detect_system_language():
     return "en"
 
 
+@functools.lru_cache(maxsize=None)
 def chrom_sort_key(chrom):
     """Канонический порядок сортировки хромосом: 1..22, X, Y, M/MT, затем остальные контиги"""
     c = chrom.lower()
@@ -62,12 +76,23 @@ def chrom_sort_key(chrom):
     return (2, 0, c)
 
 
-REV_COMP_TRANS = str.maketrans("ACGTNacgtn", "TGCANtgcan")
+# Обратный комплемент с поддержкой кодов IUPAC (S и W комплементарны сами себе)
+REV_COMP_TRANS = str.maketrans("ACGTRYKMBDHVNacgtrykmbdhvn", "TGCAYRMKVHDBNtgcayrmkvhdbn")
+M_ALIASES = ('chrM', 'MT', 'M', 'chrMT')
+M_NAMES_UPPER = ('MT', 'CHRM', 'M', 'CHRMT')
+
+
+def is_symbolic(allele):
+    return allele.startswith('<') or allele in ('*', '.')
+
+
+def is_breakend(allele):
+    return '[' in allele or ']' in allele
 
 
 def rev_comp_allele(allele):
-    """Обратный комплемент нуклеотидов с пропуском спец-символов VCF"""
-    if allele.startswith('<') or allele == '*' or allele == '.':
+    """Обратный комплемент нуклеотидов с пропуском спец-символов VCF/MAF"""
+    if is_symbolic(allele) or allele == '-':
         return allele
     return allele.translate(REV_COMP_TRANS)[::-1]
 
@@ -75,14 +100,16 @@ def rev_comp_allele(allele):
 def get_fasta_seq(fasta_obj, chrom, start_0, end_0):
     """Извлекает срез нуклеотидов из индекса FASTA с авто-сопоставлением имен хромосом"""
     try:
+        if start_0 < 0:
+            return None
         if chrom in fasta_obj:
             return str(fasta_obj[chrom][start_0:end_0]).upper()
         if chrom.startswith("chr") and chrom[3:] in fasta_obj:
             return str(fasta_obj[chrom[3:]][start_0:end_0]).upper()
         if not chrom.startswith("chr") and ("chr" + chrom) in fasta_obj:
             return str(fasta_obj["chr" + chrom][start_0:end_0]).upper()
-        if chrom.upper() in ("MT", "CHRM", "M", "CHRMT"):
-            for m_alias in ("chrM", "MT", "M", "chrMT"):
+        if chrom.upper() in M_NAMES_UPPER:
+            for m_alias in M_ALIASES:
                 if m_alias in fasta_obj:
                     return str(fasta_obj[m_alias][start_0:end_0]).upper()
     except Exception:
@@ -90,44 +117,312 @@ def get_fasta_seq(fasta_obj, chrom, start_0, end_0):
     return None
 
 
+def add_info(info, tags):
+    """Добавляет теги в поле INFO"""
+    extra = ';'.join(tags)
+    return extra if info in ('.', '') else info + ';' + extra
+
+
+def _fmt_num(x):
+    return format(x, '.6g')
+
+
 def swap_genotypes_and_format(format_str, sample_str):
-    """Инвертирует GT (0<->1), а также пересчитывает PL и AD при замене REF/ALT"""
+    """Пересчитывает поля образца при замене REF<->ALT (один ALT):
+    GT (диплоидный и гаплоидный), PL/GL, AD/ADF/ADR, FORMAT/AF."""
     if not format_str or not sample_str or sample_str == '.':
         return sample_str
-    fmt_keys = format_str.split(':')
-    sm_vals = sample_str.split(':')
+    keys = format_str.split(':')
+    vals = sample_str.split(':')
 
-    gt_idx = fmt_keys.index('GT') if 'GT' in fmt_keys else -1
-    pl_idx = fmt_keys.index('PL') if 'PL' in fmt_keys else -1
-    ad_idx = fmt_keys.index('AD') if 'AD' in fmt_keys else -1
+    def idx(name):
+        i = keys.index(name) if name in keys else -1
+        return i if 0 <= i < len(vals) else -1
 
-    if gt_idx != -1 and gt_idx < len(sm_vals):
-        gt_val = sm_vals[gt_idx]
-        sep = '/' if '/' in gt_val else ('|' if '|' in gt_val else None)
-        if sep:
-            alleles = gt_val.split(sep)
-            new_alleles = []
-            for a in alleles:
-                if a == '0':
-                    new_alleles.append('1')
-                elif a == '1':
-                    new_alleles.append('0')
-                else:
-                    new_alleles.append(a)
-            sm_vals[gt_idx] = sep.join(new_alleles)
+    i = idx('GT')
+    if i != -1:
+        tokens = re.split(r'([/|])', vals[i])
+        vals[i] = ''.join(('1' if t == '0' else '0' if t == '1' else t) for t in tokens)
 
-    if pl_idx != -1 and pl_idx < len(sm_vals):
-        pls = sm_vals[pl_idx].split(',')
-        if len(pls) == 3:
-            sm_vals[pl_idx] = f"{pls[2]},{pls[1]},{pls[0]}"
+    for name in ('PL', 'GL'):
+        i = idx(name)
+        if i != -1:
+            items = vals[i].split(',')
+            if len(items) in (2, 3):  # гаплоидный (2) или диплоидный (3) биаллельный
+                vals[i] = ','.join(reversed(items))
 
-    if ad_idx != -1 and ad_idx < len(sm_vals):
-        ads = sm_vals[ad_idx].split(',')
-        if len(ads) == 2:
-            sm_vals[ad_idx] = f"{ads[1]},{ads[0]}"
+    for name in ('AD', 'ADF', 'ADR'):
+        i = idx(name)
+        if i != -1:
+            items = vals[i].split(',')
+            if len(items) == 2:
+                vals[i] = ','.join(reversed(items))
 
-    return ':'.join(sm_vals)
+    i = idx('AF')
+    if i != -1 and ',' not in vals[i] and vals[i] not in ('.', ''):
+        try:
+            vals[i] = _fmt_num(1.0 - float(vals[i]))
+        except ValueError:
+            pass
 
+    return ':'.join(vals)
+
+
+def swap_info_fields(info):
+    """Пересчитывает популяционные поля INFO при замене REF<->ALT (один ALT):
+    AF, MLEAF -> 1-x; AC, MLEAC -> AN-x (если есть AN)."""
+    if info in ('.', ''):
+        return info
+    items = info.split(';')
+    an = None
+    for it in items:
+        if it.startswith('AN='):
+            try:
+                an = int(it[3:])
+            except ValueError:
+                pass
+    for n, it in enumerate(items):
+        key, eq, val = it.partition('=')
+        if not eq or ',' in val:
+            continue
+        try:
+            if key in ('AF', 'MLEAF'):
+                items[n] = f"{key}={_fmt_num(1.0 - float(val))}"
+            elif key in ('AC', 'MLEAC') and an is not None:
+                items[n] = f"{key}={an - int(val)}"
+        except ValueError:
+            pass
+    return ';'.join(items)
+
+
+# =============================================================================
+#  Ввод / вывод: gzip на чтение, настоящий BGZF на запись
+# =============================================================================
+
+_BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+class BgzfWriter:
+    """Текстовый писатель в формате BGZF (блочный gzip), пригодный для tabix / bcftools index.
+    Не требует сторонних библиотек."""
+    BLOCK = 0xff00  # максимум несжатых данных на блок (сжатый блок гарантированно < 64 КБ)
+
+    def __init__(self, path):
+        self._f = open(path, 'wb')
+        self._buf = bytearray()
+        self._closed = False
+
+    def _write_block(self, data):
+        comp = zlib.compressobj(6, zlib.DEFLATED, -15)
+        cdata = comp.compress(data) + comp.flush()
+        bsize = len(cdata) + 25  # (полный размер блока) - 1
+        header = (b'\x1f\x8b\x08\x04' + b'\x00\x00\x00\x00' + b'\x00\xff' +
+                  b'\x06\x00' + b'BC' + b'\x02\x00' + struct.pack('<H', bsize))
+        footer = struct.pack('<II', zlib.crc32(data) & 0xffffffff, len(data) & 0xffffffff)
+        self._f.write(header + cdata + footer)
+
+    def write(self, text):
+        self._buf += text.encode('utf-8')
+        while len(self._buf) >= self.BLOCK:
+            self._write_block(bytes(self._buf[:self.BLOCK]))
+            del self._buf[:self.BLOCK]
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            if self._buf:
+                self._write_block(bytes(self._buf))
+                self._buf.clear()
+            self._f.write(_BGZF_EOF)
+        finally:
+            self._f.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+def _is_gzip_file(filepath):
+    try:
+        with open(filepath, 'rb') as f:
+            return f.read(2) == b'\x1f\x8b'
+    except OSError:
+        return False
+
+
+def open_file_read(filepath):
+    """Открывает текстовый файл; gzip/BGZF определяется по сигнатуре, а не по расширению"""
+    if _is_gzip_file(filepath):
+        return gzip.open(filepath, 'rt', encoding='utf-8', errors='replace')
+    return open(filepath, 'rt', encoding='utf-8', errors='replace')
+
+
+def open_file_write(filepath):
+    """.gz / .bgz пишутся как BGZF; остальное — обычный текст с LF-переводами строк"""
+    if filepath.lower().endswith(('.gz', '.bgz')):
+        return BgzfWriter(filepath)
+    return open(filepath, 'w', encoding='utf-8', newline='\n')
+
+
+def read_chain_target_sizes(chain_path):
+    """Длины контигов целевой сборки (qName/qSize) из заголовков chain-файла"""
+    sizes = {}
+    try:
+        opener = gzip.open if _is_gzip_file(chain_path) else open
+        with opener(chain_path, 'rb') as f:
+            for line in f:
+                if line.startswith(b'chain '):
+                    p = line.split()
+                    if len(p) >= 9:
+                        sizes[p[7].decode('utf-8', 'replace')] = int(p[8])
+    except Exception:
+        pass
+    return sizes
+
+
+def lookup_length(lengths, name):
+    cands = [name, name[3:] if name.startswith('chr') else 'chr' + name]
+    if name.upper() in M_NAMES_UPPER:
+        cands.extend(M_ALIASES)
+    for c in cands:
+        if c in lengths:
+            return lengths[c]
+    return None
+
+
+def detect_format(filename):
+    """Определяет формат по имени файла (с учётом .gz / .bgz)"""
+    name = filename.lower()
+    for suf in ('.gz', '.bgz'):
+        if name.endswith(suf):
+            name = name[:-len(suf)]
+            break
+    if name.endswith(('.g.vcf', '.gvcf')):
+        return 'gvcf'
+    if name.endswith('.vcf'):
+        return 'vcf'
+    if name.endswith(('.bed', '.bedgraph', '.bdg')):
+        return 'bed'
+    if name.endswith(('.gff', '.gff3', '.gtf')):
+        return 'gff'
+    if name.endswith('.wig'):
+        return 'wig'
+    if name.endswith('.maf'):
+        return 'maf'
+    return None
+
+
+def suggest_output_path(filename):
+    name, comp = filename, ''
+    for suf in ('.gz', '.bgz'):
+        if name.lower().endswith(suf):
+            comp = name[-len(suf):]
+            name = name[:-len(suf)]
+            break
+    base, ext = os.path.splitext(name)
+    return f"{base}_lifted{ext}{comp}"
+
+
+def parse_dnd_path(root, event_data):
+    """Корректно разбирает строку Drag&Drop (пути с пробелами, несколько файлов) — берёт первый файл"""
+    try:
+        items = root.tk.splitlist(event_data)
+    except Exception:
+        items = [event_data.strip()]
+    return items[0] if items else ""
+
+
+def find_preset_chain(filename):
+    """Поиск встроенного chain-файла в папке chains внутри сборки или рядом с ней"""
+    search_dirs = []
+    if hasattr(sys, '_MEIPASS'):
+        search_dirs.extend([
+            os.path.join(sys._MEIPASS, "chains"),
+            sys._MEIPASS
+        ])
+    base_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
+    search_dirs.extend([
+        os.path.join(base_dir, "chains"),
+        base_dir
+    ])
+
+    for d in search_dirs:
+        candidate = os.path.join(d, filename)
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
+# =============================================================================
+#  Внешняя сортировка (ограниченное потребление памяти)
+# =============================================================================
+
+class ExternalSorter:
+    """Сортирует записи (chrom, pos, end, payload) по (хромосома, начало, конец).
+    При превышении лимита памяти сброс отсортированных блоков во временные файлы + слияние."""
+
+    def __init__(self, max_bytes=96 * 1024 * 1024):
+        self.max_bytes = max_bytes
+        self.buf = []
+        self.size = 0
+        self.chunks = []
+
+    @staticmethod
+    def _key(r):
+        return (chrom_sort_key(r[0]), r[1], r[2])
+
+    def add(self, chrom, pos, end, payload):
+        """payload обязан заканчиваться одним '\\n' и не содержать других переводов строк"""
+        self.buf.append((chrom, pos, end, payload))
+        self.size += len(payload) + len(chrom) + 80
+        if self.size >= self.max_bytes:
+            self._spill()
+
+    def _spill(self):
+        if not self.buf:
+            return
+        self.buf.sort(key=self._key)
+        f = tempfile.TemporaryFile('w+', encoding='utf-8', newline='\n')
+        f.writelines(f"{c}\t{p}\t{e}\t{pl}" for c, p, e, pl in self.buf)
+        f.flush()
+        f.seek(0)
+        self.chunks.append(f)
+        self.buf = []
+        self.size = 0
+
+    def items(self):
+        if not self.chunks:
+            self.buf.sort(key=self._key)
+            yield from self.buf
+            return
+        self._spill()
+
+        def gen(fh):
+            for line in fh:
+                c, p, e, pl = line.split('\t', 3)
+                yield (c, int(p), int(e), pl)
+
+        yield from heapq.merge(*[gen(f) for f in self.chunks], key=self._key)
+
+    def close(self):
+        for f in self.chunks:
+            try:
+                f.close()
+            except Exception:
+                pass
+        self.chunks = []
+        self.buf = []
+        self.size = 0
+
+
+# =============================================================================
+#  Локализация
+# =============================================================================
 
 class I18nManager:
     """Менеджер локализации без захардкоженных языковых строк с fallback на en.json"""
@@ -162,7 +457,7 @@ class I18nManager:
     def _load_available_languages(self):
         for loc_dir in self._get_locales_dirs():
             if os.path.exists(loc_dir):
-                for fpath in glob.glob(os.path.join(loc_dir, "*.json")):
+                for fpath in sorted(glob.glob(os.path.join(loc_dir, "*.json"))):
                     code = os.path.splitext(os.path.basename(fpath))[0].lower()
                     try:
                         with open(fpath, 'r', encoding='utf-8') as f:
@@ -170,6 +465,7 @@ class I18nManager:
                             self.languages[code] = {"name": data.get("lang_name", code.upper()), "path": fpath}
                     except Exception:
                         pass
+        self.languages = dict(sorted(self.languages.items()))
 
     def set_language(self, code):
         if code in self.languages:
@@ -185,46 +481,638 @@ class I18nManager:
         if kwargs:
             try:
                 text = text.format(**kwargs)
-            except KeyError:
+            except (KeyError, IndexError, ValueError):
                 pass
         return text
 
 
-def parse_dnd_path(event_data):
-    path = event_data.strip()
-    if path.startswith('{') and path.endswith('}'):
-        path = path[1:-1]
-    return path
+# =============================================================================
+#  Ядро конвертации (не зависит от Tk — выполняется в рабочем потоке)
+# =============================================================================
+
+Lifted = namedtuple('Lifted', 'chrom start0 end0 strand exact')
+
+END_RE = re.compile(r'(?:^|;)END=(\d+)(?=;|$)')
+END_SUB = re.compile(r'((?:^|;)END=)\d+(?=;|$)')
+
+MAF_ALLELE_COLUMNS = ('Reference_Allele', 'Tumor_Seq_Allele1', 'Tumor_Seq_Allele2',
+                      'Match_Norm_Seq_Allele1', 'Match_Norm_Seq_Allele2')
 
 
-def find_preset_chain(filename):
-    """Поиск встроенного chain-файла в папке chains внутри сборки или рядом с ней"""
-    search_dirs = []
-    if hasattr(sys, '_MEIPASS'):
-        search_dirs.extend([
-            os.path.join(sys._MEIPASS, "chains"),
-            sys._MEIPASS
-        ])
-    base_dir = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__))
-    search_dirs.extend([
-        os.path.join(base_dir, "chains"),
-        base_dir
-    ])
+class LiftOverEngine:
+    def __init__(self, lo, fasta_obj, cmap, auto_chr, save_unmapped, log, t,
+                 chain_file="", target_lengths=None):
+        self.lo = lo
+        self.fasta = fasta_obj
+        self.strict = fasta_obj is not None
+        self.cmap = cmap or {}
+        self.auto_chr = auto_chr
+        self.save_unm = save_unmapped
+        self.log = log
+        self.t = t
+        self.chain_file = chain_file
+        self.target_lengths = target_lengths
+        self.f_unm = None
+        self.f_rej = None
+        self._reset_stats()
 
-    for d in search_dirs:
-        candidate = os.path.join(d, filename)
-        if os.path.exists(candidate):
-            return candidate
-    return None
+    def _reset_stats(self):
+        self.total = self.mapped = self.unmapped = 0
+        self.swapped = self.rejected = 0
+        self.inverted = self.inverted_skipped = 0
+
+    @property
+    def stats(self):
+        return dict(total=self.total, mapped=self.mapped, unmapped=self.unmapped,
+                    swapped=self.swapped, rejected=self.rejected,
+                    inverted=self.inverted, inverted_skipped=self.inverted_skipped)
+
+    # ---------- координаты ----------
+
+    def _lift_coord(self, chrom, pos_0):
+        if pos_0 < 0:
+            return None
+        target_chrom = self.cmap.get(chrom, chrom)
+        res = self.lo.convert_coordinate(target_chrom, pos_0)
+        if res:
+            return res[0]
+
+        if self.auto_chr:
+            if target_chrom.upper() in M_NAMES_UPPER:
+                for m_alias in M_ALIASES:
+                    if m_alias != target_chrom:
+                        res = self.lo.convert_coordinate(m_alias, pos_0)
+                        if res:
+                            return res[0]
+
+            alt_chrom = target_chrom[3:] if target_chrom.startswith('chr') else 'chr' + target_chrom
+            res = self.lo.convert_coordinate(alt_chrom, pos_0)
+            if res:
+                return res[0]
+        return None
+
+    def _lift_interval(self, chrom, start0, end0):
+        """Переносит замкнутый 0-based интервал [start0, end0]. Для '-' цепи концы меняются местами.
+        exact=True, если длина интервала сохранилась (внутри нет разрывов цепочки)."""
+        cs = self._lift_coord(chrom, start0)
+        if not cs:
+            return None
+        ce = cs if end0 == start0 else self._lift_coord(chrom, end0)
+        if not ce or cs[0] != ce[0] or cs[2] != ce[2]:
+            return None
+        if cs[2] == '-':
+            s, e = ce[1], cs[1]
+        else:
+            s, e = cs[1], ce[1]
+        if e < s:
+            return None
+        return Lifted(cs[0], s, e, cs[2], (e - s) == (end0 - start0))
+
+    @staticmethod
+    def _format_output_chrom(orig_chrom, target_chrom, explicit=False):
+        if explicit:  # пользователь сам задал соответствие в файле — используем имя целевой сборки
+            return target_chrom
+        if orig_chrom.upper() == 'MT':
+            return 'MT'
+        if orig_chrom.lower() == 'chrm':
+            return 'chrM'
+        if orig_chrom.upper() == 'M':
+            return 'M'
+
+        orig_has_chr = orig_chrom.lower().startswith('chr')
+        target_has_chr = target_chrom.lower().startswith('chr')
+
+        if not orig_has_chr and target_has_chr:
+            stripped = target_chrom[3:]
+            if stripped.upper() == 'M':
+                return 'MT' if orig_chrom.upper() == 'MT' else 'M'
+            return stripped
+        elif orig_has_chr and not target_has_chr:
+            if target_chrom.upper() == 'MT':
+                return 'chrM'
+            return 'chr' + target_chrom
+        return target_chrom
+
+    # ---------- учёт и вывод ----------
+
+    def _tick(self):
+        self.total += 1
+        if self.total % 25000 == 0:
+            self.log(self.t("log_progress", total=self.total, mapped=self.mapped, unmapped=self.unmapped))
+
+    def _unmapped(self, line):
+        self.unmapped += 1
+        if self.f_unm:
+            self.f_unm.write(line if line.endswith('\n') else line + '\n')
+        return None
+
+    def _reject(self, parts, reason):
+        self.rejected += 1
+        if self.f_rej:
+            p = list(parts)
+            p[7] = add_info(p[7], ["LIFTOVER_REJECT_REASON=" + reason])
+            self.f_rej.write('\t'.join(p) + '\n')
+        return None
+
+    def _write_sorted(self, f_out, sorter):
+        if self.mapped:
+            self.log(self.t("log_sorting", count=self.mapped))
+        for _c, _p, _e, payload in sorter.items():
+            f_out.write(payload)
+
+    # ---------- точка входа ----------
+
+    def run(self, cmd_type, in_file, out_file):
+        self._reset_stats()
+        if self.target_lengths is None:
+            if self.strict:
+                try:
+                    self.target_lengths = {k: len(self.fasta[k]) for k in self.fasta.keys()}
+                except Exception:
+                    self.target_lengths = {}
+            else:
+                self.target_lengths = read_chain_target_sizes(self.chain_file) if self.chain_file else {}
+
+        unm_file = out_file + ".unmapped" if self.save_unm else None
+        rej_file = (out_file + ".rejected.vcf") if cmd_type in ('vcf', 'gvcf') else (out_file + ".rejected")
+        if not self.strict:
+            rej_file = None
+
+        handlers = {'vcf': self._run_vcf, 'gvcf': self._run_vcf, 'bed': self._run_bed,
+                    'gff': self._run_gff, 'wig': self._run_wig, 'maf': self._run_maf}
+        try:
+            with contextlib.ExitStack() as stack:
+                f_in = stack.enter_context(open_file_read(in_file))
+                f_out = stack.enter_context(open_file_write(out_file))
+                self.f_unm = stack.enter_context(open_file_write(unm_file)) if unm_file else None
+                self.f_rej = stack.enter_context(open_file_write(rej_file)) if rej_file else None
+                handlers[cmd_type](f_in, f_out)
+        except BaseException:
+            for p in (out_file, unm_file, rej_file):  # не оставляем недописанные файлы
+                if p and os.path.exists(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+            raise
+        finally:
+            self.f_unm = self.f_rej = None
+
+        if unm_file and self.unmapped == 0 and os.path.exists(unm_file):
+            os.remove(unm_file)
+        if rej_file and self.rejected == 0 and os.path.exists(rej_file):
+            os.remove(rej_file)
+        return self.stats
+
+    # =========================================================================
+    #  VCF / gVCF
+    # =========================================================================
+
+    def _run_vcf(self, f_in, f_out):
+        sorter = ExternalSorter()
+        header, chrom_line, seen = [], None, set()
+        try:
+            for line in f_in:
+                if line.startswith('##'):
+                    header.append(line if line.endswith('\n') else line + '\n')
+                    if self.f_rej:
+                        self.f_rej.write(header[-1])
+                    continue
+                if line.startswith('#'):
+                    chrom_line = line if line.endswith('\n') else line + '\n'
+                    if self.f_rej:
+                        self.f_rej.write('##INFO=<ID=LIFTOVER_REJECT_REASON,Number=1,Type=String,'
+                                         'Description="Reason for liftover rejection">\n')
+                        self.f_rej.write(chrom_line)
+                    continue
+                if not line.strip():
+                    continue
+                self._tick()
+                rec = self._convert_vcf_record(line)
+                if rec:
+                    chrom, pos, out_line = rec
+                    seen.add(chrom)
+                    sorter.add(chrom, pos, pos, out_line)
+                    self.mapped += 1
+
+            # --- заголовок для целевой сборки ---
+            out_header = [h for h in header if not h.startswith(('##contig', '##reference'))]
+            existing = set(re.findall(r'^##INFO=<ID=([^,>]+)', ''.join(out_header), re.M))
+            new_info = []
+            if self.strict and 'LIFTOVER_SWAPPED' not in existing:
+                new_info.append('##INFO=<ID=LIFTOVER_SWAPPED,Number=0,Type=Flag,Description="Reference and '
+                                'alternate alleles were swapped during liftover to match target genome reference">\n')
+            if 'LIFTOVER_REVERSE_COMPLEMENTED' not in existing:
+                new_info.append('##INFO=<ID=LIFTOVER_REVERSE_COMPLEMENTED,Number=0,Type=Flag,Description="Alleles '
+                                'were reverse-complemented during liftover due to negative strand alignment">\n')
+            out_header.extend(new_info)
+            chain_name = os.path.basename(self.chain_file) if self.chain_file else "unknown"
+            out_header.append(f"##LiftOverZ_chain={chain_name}\n")
+            for c in sorted(seen, key=chrom_sort_key):
+                length = lookup_length(self.target_lengths or {}, c)
+                out_header.append(f"##contig=<ID={c},length={length}>\n" if length else f"##contig=<ID={c}>\n")
+            for h in out_header:
+                f_out.write(h)
+            if chrom_line:
+                f_out.write(chrom_line)
+            self._write_sorted(f_out, sorter)
+        finally:
+            sorter.close()
+
+    def _normalize_left_anchor(self, chrom, pos1, ref, alts):
+        """Приводит индел после обратного комплемента к виду с якорным основанием слева"""
+        als = [ref] + alts
+        while all(len(a) > 0 for a in als) and len({a[-1] for a in als}) == 1:
+            als = [a[:-1] for a in als]
+        if any(len(a) == 0 for a in als):
+            if pos1 <= 1:
+                return None
+            base = get_fasta_seq(self.fasta, chrom, pos1 - 2, pos1 - 1)
+            if not base:
+                return None
+            als = [base + a for a in als]
+            pos1 -= 1
+        return pos1, als[0], als[1:]
+
+    def _convert_vcf_record(self, line):
+        parts = line.rstrip('\r\n').split('\t')
+        if len(parts) < 5:
+            return self._unmapped(line)
+        try:
+            pos = int(parts[1])
+        except ValueError:
+            return self._unmapped(line)
+        while len(parts) < 8:
+            parts.append('.')
+        orig = list(parts)
+
+        chrom = parts[0]
+        ref = parts[3].upper()
+        alts = parts[4].upper().split(',')
+
+        m = END_RE.search(parts[7])
+        end1 = int(m.group(1)) if m else None
+        has_end = end1 is not None and end1 >= pos
+        span_end1 = end1 if has_end else pos + len(ref) - 1
+
+        lifted = self._lift_interval(chrom, pos - 1, span_end1 - 1)
+        if lifted is None:
+            return self._unmapped(line)
+        if not has_end and not lifted.exact:  # REF пересекает разрыв цепочки
+            return self._unmapped(line)
+
+        neg = lifted.strand == '-'
+        target_c = self._format_output_chrom(chrom, lifted.chrom, chrom in self.cmap)
+        new_pos = lifted.start0 + 1
+        new_end = lifted.end0 + 1
+        tags = []
+        same_len = True
+
+        if neg:
+            if any(is_breakend(a) for a in alts):
+                return self._unmapped(line)
+            cur_alts = [rev_comp_allele(a) for a in alts]
+            if has_end:
+                cur_ref = None
+            else:
+                same_len = all(is_symbolic(a) or len(a) == len(ref) for a in alts)
+                if not same_len and not self.strict:
+                    self.inverted_skipped += 1
+                    return self._unmapped(line)
+                cur_ref = rev_comp_allele(ref)
+            tags.append('LIFTOVER_REVERSE_COMPLEMENTED')
+        else:
+            cur_ref, cur_alts = ref, alts
+
+        swapped_now = False
+
+        if not self.strict:
+            if neg:
+                parts[3] = cur_ref if cur_ref is not None else 'N'
+                parts[4] = ','.join(cur_alts)
+        else:
+            if has_end and neg:
+                # блок / SV на обратной цепи: REF берём из целевого генома
+                base = get_fasta_seq(self.fasta, lifted.chrom, lifted.start0, lifted.start0 + 1)
+                if base is None:
+                    return self._reject(orig, "ContigNotFoundInFasta")
+                cur_ref = base
+            else:
+                fasta_ref = get_fasta_seq(self.fasta, lifted.chrom, lifted.start0, lifted.start0 + len(cur_ref))
+                if fasta_ref is None:
+                    return self._reject(orig, "ContigNotFoundInFasta")
+                if cur_ref == fasta_ref:
+                    if neg and not same_len and not any(is_symbolic(a) for a in cur_alts):
+                        norm = self._normalize_left_anchor(lifted.chrom, new_pos, cur_ref, cur_alts)
+                        if norm is None:
+                            return self._reject(orig, "CannotAnchorInvertedIndel")
+                        new_pos, cur_ref, cur_alts = norm
+                elif len(cur_alts) == 1 and cur_alts[0] == fasta_ref and len(cur_ref) == len(fasta_ref):
+                    # Референс сменился на мутантный аллель (Swap REF/ALT)
+                    cur_ref, cur_alts = cur_alts[0], [cur_ref]
+                    swapped_now = True
+                    tags.insert(0, 'LIFTOVER_SWAPPED')
+                else:
+                    return self._reject(orig, "MismatchedRefAllele")
+            parts[3] = cur_ref
+            parts[4] = ','.join(cur_alts)
+
+        if swapped_now:
+            if len(parts) >= 10:
+                fmt = parts[8]
+                for s_idx in range(9, len(parts)):
+                    parts[s_idx] = swap_genotypes_and_format(fmt, parts[s_idx])
+            parts[7] = swap_info_fields(parts[7])
+            self.swapped += 1
+
+        if has_end:
+            parts[7] = END_SUB.sub(lambda mm: mm.group(1) + str(new_end), parts[7])
+        if tags:
+            parts[7] = add_info(parts[7], tags)
+        if neg:
+            self.inverted += 1
+
+        parts[0] = target_c
+        parts[1] = str(new_pos)
+        return (target_c, new_pos, '\t'.join(parts) + '\n')
+
+    # =========================================================================
+    #  BED / BEDGraph (включая BED12)
+    # =========================================================================
+
+    def _lift_thick(self, chrom, ts, te, start, end, new_s, new_e, neg, exact):
+        if ts == te:
+            return new_s, new_s
+        if exact:
+            if neg:
+                return new_s + (end - te), new_s + (end - ts)
+            return new_s + (ts - start), new_s + (te - start)
+        a = self._lift_interval(chrom, ts, te - 1)
+        if a:
+            return a.start0, a.end0 + 1
+        return new_s, new_e
+
+    def _run_bed(self, f_in, f_out):
+        sorter, header = ExternalSorter(), []
+        try:
+            for line in f_in:
+                if line.startswith(('#', 'track', 'browser')):
+                    header.append(line if line.endswith('\n') else line + '\n')
+                    continue
+                if not line.strip():
+                    continue
+                self._tick()
+                rec = self._convert_bed_line(line)
+                if rec:
+                    c, s, e, out = rec
+                    sorter.add(c, s, e, out)
+                    self.mapped += 1
+            f_out.writelines(header)
+            self._write_sorted(f_out, sorter)
+        finally:
+            sorter.close()
+
+    def _convert_bed_line(self, line):
+        parts = line.rstrip('\r\n').split('\t')
+        if len(parts) < 3:
+            return self._unmapped(line)
+        try:
+            chrom, start, end = parts[0], int(parts[1]), int(parts[2])
+            if end < start:
+                return self._unmapped(line)
+            zero = end == start
+            lifted = self._lift_interval(chrom, start, start if zero else end - 1)
+            if lifted is None:
+                return self._unmapped(line)
+            new_s = lifted.start0
+            new_e = new_s if zero else lifted.end0 + 1
+            neg = lifted.strand == '-'
+            exact = (new_e - new_s) == (end - start)
+            target_c = self._format_output_chrom(chrom, lifted.chrom, chrom in self.cmap)
+
+            if neg and len(parts) >= 6 and parts[5] in ('+', '-'):
+                parts[5] = '-' if parts[5] == '+' else '+'
+            if len(parts) >= 8:
+                ts, te = self._lift_thick(chrom, int(parts[6]), int(parts[7]), start, end,
+                                          new_s, new_e, neg, exact)
+                parts[6], parts[7] = str(ts), str(te)
+            if len(parts) >= 12:
+                if not exact:  # блоки нельзя корректно пересчитать при изменении длины
+                    return self._unmapped(line)
+                trailing = ',' if parts[10].endswith(',') else ''
+                sizes = [int(x) for x in parts[10].strip(',').split(',')]
+                starts = [int(x) for x in parts[11].strip(',').split(',')]
+                blocks = list(zip(starts, sizes))
+                if neg:
+                    blocks = sorted(((end - start) - (st + sz), sz) for st, sz in blocks)
+                parts[10] = ','.join(str(sz) for _, sz in blocks) + trailing
+                parts[11] = ','.join(str(st) for st, _ in blocks) + trailing
+        except ValueError:
+            return self._unmapped(line)
+
+        if neg:
+            self.inverted += 1
+        parts[0], parts[1], parts[2] = target_c, str(new_s), str(new_e)
+        return (target_c, new_s, new_e, '\t'.join(parts) + '\n')
+
+    # =========================================================================
+    #  GFF / GTF / GFF3
+    # =========================================================================
+
+    def _run_gff(self, f_in, f_out):
+        sorter, header, trailer, in_fasta = ExternalSorter(), [], [], False
+        try:
+            for line in f_in:
+                if in_fasta:
+                    trailer.append(line if line.endswith('\n') else line + '\n')
+                    continue
+                if line.startswith('##FASTA'):
+                    in_fasta = True
+                    trailer.append(line if line.endswith('\n') else line + '\n')
+                    continue
+                if line.startswith('#'):
+                    header.append(line if line.endswith('\n') else line + '\n')
+                    continue
+                if not line.strip():
+                    continue
+                self._tick()
+                rec = self._convert_gff_line(line)
+                if rec:
+                    c, s, e, out = rec
+                    sorter.add(c, s, e, out)
+                    self.mapped += 1
+            f_out.writelines(header)
+            self._write_sorted(f_out, sorter)
+            f_out.writelines(trailer)
+        finally:
+            sorter.close()
+
+    def _convert_gff_line(self, line):
+        parts = line.rstrip('\r\n').split('\t')
+        if len(parts) < 5:
+            return self._unmapped(line)
+        try:
+            chrom, s1, e1 = parts[0], int(parts[3]), int(parts[4])
+        except ValueError:
+            return self._unmapped(line)
+        lifted = self._lift_interval(chrom, s1 - 1, e1 - 1)
+        if lifted is None:
+            return self._unmapped(line)
+        target_c = self._format_output_chrom(chrom, lifted.chrom, chrom in self.cmap)
+        new_s, new_e = lifted.start0 + 1, lifted.end0 + 1
+        if lifted.strand == '-':
+            self.inverted += 1
+            if len(parts) > 6 and parts[6] in ('+', '-'):
+                parts[6] = '-' if parts[6] == '+' else '+'
+        parts[0], parts[3], parts[4] = target_c, str(new_s), str(new_e)
+        return (target_c, new_s, new_e, '\t'.join(parts) + '\n')
+
+    # =========================================================================
+    #  Wiggle (variableStep и fixedStep -> всегда variableStep на выходе)
+    # =========================================================================
+
+    def _run_wig(self, f_in, f_out):
+        state = {'sorter': ExternalSorter()}
+        chrom = None
+        mode = None
+        start = step = 1
+        span = 1
+        idx = 0
+
+        def flush():
+            last = None
+            for c, p, _e, payload in state['sorter'].items():
+                sp, val = payload.rstrip('\n').split('\t', 1)
+                if (c, sp) != last:
+                    f_out.write(f"variableStep chrom={c}" + (f" span={sp}" if sp != '1' else '') + "\n")
+                    last = (c, sp)
+                f_out.write(f"{p + 1}\t{val}\n")
+            state['sorter'].close()
+            state['sorter'] = ExternalSorter()
+
+        try:
+            for line in f_in:
+                sline = line.strip()
+                if not sline:
+                    continue
+                if sline.startswith(('#', 'browser')):
+                    f_out.write(sline + '\n')
+                    continue
+                if sline.startswith('track'):
+                    flush()
+                    f_out.write(sline + '\n')
+                    chrom = mode = None
+                    continue
+                if sline.startswith(('variableStep', 'fixedStep')):
+                    tokens = sline.split()
+                    mode = 'variable' if tokens[0] == 'variableStep' else 'fixed'
+                    kv = dict(t.split('=', 1) for t in tokens[1:] if '=' in t)
+                    chrom = kv.get('chrom')
+                    try:
+                        span = int(kv.get('span', 1))
+                        start = int(kv.get('start', 1))
+                        step = int(kv.get('step', 1))
+                    except ValueError:
+                        span, start, step = 1, 1, 1
+                    idx = 0
+                    continue
+
+                self._tick()
+                parts = sline.split()
+                try:
+                    if mode == 'fixed':
+                        pos1, val = start + idx * step, parts[0]
+                        idx += 1
+                    else:
+                        pos1, val = int(parts[0]), parts[1]
+                    if chrom is None or mode is None:
+                        raise ValueError
+                except (ValueError, IndexError):
+                    self._unmapped(f"{chrom}\t{sline}\n")
+                    continue
+
+                lifted = self._lift_interval(chrom, pos1 - 1, pos1 - 1 + span - 1)
+                if lifted is None:
+                    self._unmapped(f"{chrom}\t{pos1}\t{val}\n")
+                    continue
+                target_c = self._format_output_chrom(chrom, lifted.chrom, chrom in self.cmap)
+                if lifted.strand == '-':
+                    self.inverted += 1
+                state['sorter'].add(target_c, lifted.start0, lifted.start0, f"{span}\t{val}\n")
+                self.mapped += 1
+            if self.mapped:
+                self.log(self.t("log_sorting", count=self.mapped))
+            flush()
+        finally:
+            state['sorter'].close()
+
+    # =========================================================================
+    #  MAF (Mutation Annotation Format)
+    # =========================================================================
+
+    def _run_maf(self, f_in, f_out):
+        sorter, header = ExternalSorter(), []
+        chr_idx, start_idx, end_idx = 4, 5, 6
+        allele_idx = []
+        header_line = None
+        try:
+            for line in f_in:
+                if line.startswith('#'):
+                    header.append(line if line.endswith('\n') else line + '\n')
+                    continue
+                if not line.strip():
+                    continue
+                parts = line.rstrip('\r\n').split('\t')
+                if header_line is None:
+                    header_line = line if line.endswith('\n') else line + '\n'
+                    if 'Chromosome' in parts:
+                        chr_idx = parts.index('Chromosome')
+                    if 'Start_Position' in parts:
+                        start_idx = parts.index('Start_Position')
+                    if 'End_Position' in parts:
+                        end_idx = parts.index('End_Position')
+                    allele_idx = [parts.index(n) for n in MAF_ALLELE_COLUMNS if n in parts]
+                    continue
+                self._tick()
+                rec = self._convert_maf_line(line, parts, chr_idx, start_idx, end_idx, allele_idx)
+                if rec:
+                    c, s, e, out = rec
+                    sorter.add(c, s, e, out)
+                    self.mapped += 1
+            f_out.writelines(header)
+            if header_line:
+                f_out.write(header_line)
+            self._write_sorted(f_out, sorter)
+        finally:
+            sorter.close()
+
+    def _convert_maf_line(self, line, parts, chr_idx, start_idx, end_idx, allele_idx):
+        if len(parts) <= max(chr_idx, start_idx, end_idx):
+            return self._unmapped(line)
+        try:
+            chrom = parts[chr_idx]
+            s1, e1 = int(parts[start_idx]), int(parts[end_idx])
+        except ValueError:
+            return self._unmapped(line)
+        if e1 < s1:
+            return self._unmapped(line)
+        lifted = self._lift_interval(chrom, s1 - 1, e1 - 1)
+        if lifted is None:
+            return self._unmapped(line)
+        target_c = self._format_output_chrom(chrom, lifted.chrom, chrom in self.cmap)
+        new_s, new_e = lifted.start0 + 1, lifted.end0 + 1
+        if lifted.strand == '-':
+            self.inverted += 1
+            for i in allele_idx:
+                if i < len(parts):
+                    parts[i] = rev_comp_allele(parts[i])
+        parts[chr_idx], parts[start_idx], parts[end_idx] = target_c, str(new_s), str(new_e)
+        return (target_c, new_s, new_e, '\t'.join(parts) + '\n')
 
 
-def open_file_read(filepath):
-    return gzip.open(filepath, 'rt', encoding='utf-8', errors='replace') if filepath.endswith('.gz') else open(filepath, 'rt', encoding='utf-8', errors='replace')
-
-
-def open_file_write(filepath):
-    return gzip.open(filepath, 'wt', encoding='utf-8') if filepath.endswith('.gz') else open(filepath, 'w', encoding='utf-8')
-
+# =============================================================================
+#  Графический интерфейс
+# =============================================================================
 
 class LiftOverZApp:
     FORMAT_MAPPING = {
@@ -249,9 +1137,16 @@ class LiftOverZApp:
         ("preset_mm9_to_mm10", "mm9ToMm10.over.chain.gz")
     ]
 
+    GENOMIC_PATTERNS = (
+        "*.vcf *.vcf.gz *.vcf.bgz *.g.vcf *.g.vcf.gz *.gvcf *.gvcf.gz "
+        "*.bed *.bed.gz *.bedgraph *.bedgraph.gz *.gff *.gff.gz *.gff3 *.gff3.gz "
+        "*.gtf *.gtf.gz *.wig *.wig.gz *.maf *.maf.gz"
+    )
+
     def __init__(self, root):
         self.root = root
         self.i18n = I18nManager()
+        self.ui_queue = queue.Queue()  # все обращения к Tk из рабочего потока идут через очередь
 
         self.root.geometry("780x760")
         self.root.minsize(720, 680)
@@ -270,6 +1165,9 @@ class LiftOverZApp:
         self._update_ui_texts()
         self.cb_presets.current(1)
         self._on_preset_selected()
+        self.root.after(100, self._poll_ui_queue)
+
+    # ---------- построение интерфейса ----------
 
     def _build_ui(self):
         self.main_frame = ttk.Frame(self.root, padding=12)
@@ -292,9 +1190,9 @@ class LiftOverZApp:
         self.fmt_frame.pack(fill=tk.X, pady=(0, 8))
 
         self.cb_fmt = ttk.Combobox(
-            self.fmt_frame, 
-            textvariable=self.selected_format, 
-            values=list(self.FORMAT_MAPPING.keys()), 
+            self.fmt_frame,
+            textvariable=self.selected_format,
+            values=list(self.FORMAT_MAPPING.keys()),
             state="readonly"
         )
         self.cb_fmt.pack(fill=tk.X, expand=True)
@@ -338,7 +1236,7 @@ class LiftOverZApp:
         self.btn_browse_fasta = ttk.Button(self.files_frame, command=self._browse_fasta)
         self.btn_browse_fasta.grid(row=3, column=2, pady=3)
         self.ent_fasta.drop_target_register(DND_FILES)
-        self.ent_fasta.dnd_bind('<<Drop>>', lambda e: self.target_fasta_path.set(parse_dnd_path(e.data)))
+        self.ent_fasta.dnd_bind('<<Drop>>', lambda e: self.target_fasta_path.set(parse_dnd_path(self.root, e.data)))
 
         # 5. Выходной файл
         self.lbl_output = ttk.Label(self.files_frame)
@@ -359,7 +1257,7 @@ class LiftOverZApp:
         self.btn_browse_map = ttk.Button(self.opts_frame, command=self._browse_chrom_map)
         self.btn_browse_map.grid(row=0, column=2, pady=3)
         self.ent_cmap.drop_target_register(DND_FILES)
-        self.ent_cmap.dnd_bind('<<Drop>>', lambda e: self.chrom_map_path.set(parse_dnd_path(e.data)))
+        self.ent_cmap.dnd_bind('<<Drop>>', lambda e: self.chrom_map_path.set(parse_dnd_path(self.root, e.data)))
 
         self.chk_auto_chr_w = ttk.Checkbutton(self.opts_frame, variable=self.auto_chr)
         self.chk_auto_chr_w.grid(row=1, column=0, columnspan=3, sticky="w", pady=2)
@@ -415,6 +1313,8 @@ class LiftOverZApp:
         if curr_idx >= 0:
             self.cb_presets.current(curr_idx)
 
+    # ---------- события ----------
+
     def _reset_all(self):
         """Полная очистка полей и логов"""
         self.input_path.set("")
@@ -449,19 +1349,21 @@ class LiftOverZApp:
             self.chain_path.set(os.path.join("chains", filename))
 
     def _on_drop_input(self, event):
-        path = parse_dnd_path(event.data)
-        self.input_path.set(path)
-        self._auto_detect_format(path)
+        path = parse_dnd_path(self.root, event.data)
+        if path:
+            self.input_path.set(path)
+            self._auto_detect_format(path)
 
     def _on_drop_chain(self, event):
-        path = parse_dnd_path(event.data)
-        self.chain_path.set(path)
-        self.cb_presets.current(0)
+        path = parse_dnd_path(self.root, event.data)
+        if path:
+            self.chain_path.set(path)
+            self.cb_presets.current(0)
 
     def _browse_input(self):
         filename = filedialog.askopenfilename(
             title=self.i18n.t("dialog_select_input"),
-            filetypes=[("Genomic Files", "*.vcf *.vcf.gz *.gvcf *.gvcf.gz *.bed *.bedgraph *.gff *.gtf *.gff3 *.wig *.maf"), ("All Files", "*.*")]
+            filetypes=[(self.i18n.t("ft_genomic"), self.GENOMIC_PATTERNS), (self.i18n.t("ft_all"), "*.*")]
         )
         if filename:
             self.input_path.set(filename)
@@ -470,7 +1372,7 @@ class LiftOverZApp:
     def _browse_chain(self):
         filename = filedialog.askopenfilename(
             title=self.i18n.t("dialog_select_chain"),
-            filetypes=[("Chain Files", "*.chain *.chain.gz"), ("All Files", "*.*")]
+            filetypes=[(self.i18n.t("ft_chain"), "*.chain *.chain.gz"), (self.i18n.t("ft_all"), "*.*")]
         )
         if filename:
             self.chain_path.set(filename)
@@ -479,7 +1381,7 @@ class LiftOverZApp:
     def _browse_fasta(self):
         filename = filedialog.askopenfilename(
             title=self.i18n.t("dialog_select_fasta"),
-            filetypes=[("FASTA Files", "*.fa *.fasta *.fa.gz *.fasta.gz"), ("All Files", "*.*")]
+            filetypes=[(self.i18n.t("ft_fasta"), "*.fa *.fasta *.fa.gz *.fasta.gz *.fna"), (self.i18n.t("ft_all"), "*.*")]
         )
         if filename:
             self.target_fasta_path.set(filename)
@@ -487,7 +1389,7 @@ class LiftOverZApp:
     def _browse_chrom_map(self):
         filename = filedialog.askopenfilename(
             title=self.i18n.t("dialog_select_map"),
-            filetypes=[("Map Files", "*.txt *.map *.tsv"), ("All Files", "*.*")]
+            filetypes=[(self.i18n.t("ft_map"), "*.txt *.map *.tsv"), (self.i18n.t("ft_all"), "*.*")]
         )
         if filename:
             self.chrom_map_path.set(filename)
@@ -502,446 +1404,162 @@ class LiftOverZApp:
         filename = filedialog.asksaveasfilename(
             title=self.i18n.t("dialog_save_result"),
             defaultextension=default_ext,
-            filetypes=[("All Files", "*.*")]
+            filetypes=[(self.i18n.t("ft_all"), "*.*")]
         )
         if filename:
             self.out_path.set(filename)
 
     def _auto_detect_format(self, filename):
-        ext = filename.lower()
-        if ext.endswith(('.vcf', '.vcf.gz')):
-            self.selected_format.set("VCF (.vcf, .vcf.gz)")
-        elif ext.endswith(('.gvcf', '.gvcf.gz')):
-            self.selected_format.set("gVCF (.gvcf, .gvcf.gz)")
-        elif ext.endswith(('.bed', '.bedgraph')):
-            self.selected_format.set("BED / BEDGraph (.bed, .bedgraph)")
-        elif ext.endswith(('.gff', '.gff3', '.gtf')):
-            self.selected_format.set("GFF / GTF (.gff, .gtf, .gff3)")
-        elif ext.endswith('.wig'):
-            self.selected_format.set("Wiggle (.wig)")
-        elif ext.endswith('.maf'):
-            self.selected_format.set("MAF (.maf)")
+        fmt = detect_format(filename)
+        if fmt:
+            for label, code in self.FORMAT_MAPPING.items():
+                if code == fmt:
+                    self.selected_format.set(label)
+                    break
+        self.out_path.set(suggest_output_path(filename))
 
-        if filename.endswith('.gz'):
-            base, ext_inner = os.path.splitext(filename[:-3])
-            ext_name = ext_inner + '.gz'
-        else:
-            base, ext_name = os.path.splitext(filename)
-        self.out_path.set(f"{base}_lifted{ext_name}")
+    # ---------- потокобезопасный вывод ----------
 
     def log(self, text):
+        """Можно вызывать из любого потока"""
+        self.ui_queue.put(('log', text))
+
+    def _append_log(self, text):
         self.log_area.config(state='normal')
         self.log_area.insert(tk.END, text + "\n")
         self.log_area.see(tk.END)
         self.log_area.config(state='disabled')
 
-    def _start_processing(self):
-        inp = self.input_path.get()
-        chain = self.chain_path.get()
-        fasta_file = self.target_fasta_path.get().strip()
-        out = self.out_path.get()
-        cmd_type = self.FORMAT_MAPPING[self.selected_format.get()]
+    def _poll_ui_queue(self):
+        """Выполняется только в главном потоке Tk"""
+        try:
+            while True:
+                kind, payload = self.ui_queue.get_nowait()
+                if kind == 'log':
+                    self._append_log(payload)
+                elif kind == 'info':
+                    messagebox.showinfo(*payload)
+                elif kind == 'error':
+                    messagebox.showerror(*payload)
+                elif kind == 'done':
+                    self.btn_run.config(state='normal')
+                    self.btn_reset.config(state='normal')
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll_ui_queue)
 
-        if not inp or not os.path.exists(inp):
-            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_no_input"))
-            return
-        if not chain or not os.path.exists(chain):
-            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_no_chain"))
-            return
-        if fasta_file and not os.path.exists(fasta_file):
-            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("dialog_select_fasta"))
-            return
-        if not out:
-            messagebox.showerror(self.i18n.t("err_title"), self.i18n.t("err_no_output"))
-            return
-
-        self.btn_run.config(state='disabled')
-        self.btn_reset.config(state='disabled')
-        threading.Thread(target=self._run_conversion, args=(cmd_type, chain, fasta_file, inp, out), daemon=True).start()
+    # ---------- запуск ----------
 
     def _load_chrom_map(self):
-        m_path = self.chrom_map_path.get()
+        m_path = self.chrom_map_path.get().strip()
         cmap = {}
         if m_path and os.path.exists(m_path):
-            with open(m_path, 'r', encoding='utf-8') as f:
+            with open(m_path, 'r', encoding='utf-8', errors='replace') as f:
                 for line in f:
-                    parts = line.strip().split()
+                    line = line.strip()
+                    if not line or line.startswith('#'):
+                        continue
+                    parts = line.split()
                     if len(parts) >= 2:
                         cmap[parts[0]] = parts[1]
         return cmap
 
-    def _lift_coord(self, lo, chrom, pos_0, cmap, auto_chr):
-        target_chrom = cmap.get(chrom, chrom)
-        res = lo.convert_coordinate(target_chrom, pos_0)
-        if res:
-            return res[0]
+    def _start_processing(self):
+        inp = self.input_path.get().strip()
+        chain = self.chain_path.get().strip()
+        fasta_file = self.target_fasta_path.get().strip()
+        out = self.out_path.get().strip()
+        cmd_type = self.FORMAT_MAPPING[self.selected_format.get()]
+        err = self.i18n.t("err_title")
 
-        if auto_chr:
-            if target_chrom.upper() in ('MT', 'CHRM', 'M', 'CHRMT'):
-                for m_alias in ('chrM', 'MT', 'M', 'chrMT'):
-                    if m_alias != target_chrom:
-                        res = lo.convert_coordinate(m_alias, pos_0)
-                        if res:
-                            return res[0]
+        if not inp or not os.path.exists(inp):
+            messagebox.showerror(err, self.i18n.t("err_no_input"))
+            return
+        if not chain or not os.path.exists(chain):
+            messagebox.showerror(err, self.i18n.t("err_no_chain"))
+            return
+        if fasta_file and not os.path.exists(fasta_file):
+            messagebox.showerror(err, self.i18n.t("err_no_fasta"))
+            return
+        if not out:
+            messagebox.showerror(err, self.i18n.t("err_no_output"))
+            return
+        if not os.path.isdir(os.path.dirname(os.path.abspath(out))):
+            messagebox.showerror(err, self.i18n.t("err_bad_output_dir"))
+            return
+        same = os.path.abspath(inp) == os.path.abspath(out)
+        if not same and os.path.exists(out):
+            try:
+                same = os.path.samefile(inp, out)
+            except OSError:
+                pass
+        if same:
+            messagebox.showerror(err, self.i18n.t("err_same_file"))
+            return
 
-            alt_chrom = target_chrom[3:] if target_chrom.startswith('chr') else 'chr' + target_chrom
-            res = lo.convert_coordinate(alt_chrom, pos_0)
-            if res:
-                return res[0]
-
-        return None
-
-    @staticmethod
-    def _format_output_chrom(orig_chrom, target_chrom):
-        if orig_chrom.upper() == 'MT':
-            return 'MT'
-        if orig_chrom.lower() == 'chrm':
-            return 'chrM'
-        if orig_chrom.upper() == 'M':
-            return 'M'
-
-        orig_has_chr = orig_chrom.lower().startswith('chr')
-        target_has_chr = target_chrom.lower().startswith('chr')
-
-        if not orig_has_chr and target_has_chr:
-            stripped = target_chrom[3:]
-            if stripped.upper() == 'M':
-                return 'MT' if orig_chrom.upper() == 'MT' else 'M'
-            return stripped
-        elif orig_has_chr and not target_has_chr:
-            if target_chrom.upper() == 'MT':
-                return 'chrM'
-            return 'chr' + target_chrom
-        return target_chrom
-
-    def _run_conversion(self, cmd_type, chain_file, fasta_file, in_file, out_file):
+        # Все значения Tk-переменных читаем здесь, в главном потоке
         try:
-            self.log(self.i18n.t("log_started", fmt=cmd_type.upper()))
-            self.log(self.i18n.t("log_loading_chain", path=chain_file))
+            cmap = self._load_chrom_map()
+        except OSError as e:
+            messagebox.showerror(err, str(e))
+            return
+        auto_chr = self.auto_chr.get()
+        save_unm = self.save_unmapped.get()
+
+        self.btn_run.config(state='disabled')
+        self.btn_reset.config(state='disabled')
+        threading.Thread(
+            target=self._run_conversion,
+            args=(cmd_type, chain, fasta_file, inp, out, cmap, auto_chr, save_unm),
+            daemon=True
+        ).start()
+
+    def _run_conversion(self, cmd_type, chain_file, fasta_file, in_file, out_file, cmap, auto_chr, save_unm):
+        """Рабочий поток: не обращается к Tk напрямую, только через self.log / self.ui_queue"""
+        t = self.i18n.t
+        fasta_obj = None
+        try:
+            self.log(t("log_started", fmt=cmd_type.upper()))
+            self.log(t("log_loading_chain", path=chain_file))
             lo = LiftOver(chain_file)
 
-            fasta_obj = None
             if fasta_file:
-                self.log(self.i18n.t("log_loading_fasta", path=fasta_file))
-                fasta_obj = Fasta(fasta_file, as_raw=True, sequence_always_upper=True, read_ahead=100000)
+                self.log(t("log_loading_fasta", path=fasta_file))
+                try:
+                    fasta_obj = Fasta(fasta_file, as_raw=True, sequence_always_upper=True, read_ahead=100000)
+                except Exception as e:
+                    raise RuntimeError(t("err_fasta_open", error=e))
 
-            cmap = self._load_chrom_map()
-            auto_chr = self.auto_chr.get()
-            save_unm = self.save_unmapped.get()
+            engine = LiftOverEngine(lo, fasta_obj, cmap, auto_chr, save_unm, self.log, t, chain_file=chain_file)
+            self.log(t("log_processing", path=in_file))
+            st = engine.run(cmd_type, in_file, out_file)
 
-            unm_file = out_file + ".unmapped" if save_unm else None
-            f_unm = open_file_write(unm_file) if unm_file else None
+            if st['inverted']:
+                self.log(t("log_inverted", count=st['inverted']))
+            if st['inverted_skipped']:
+                self.log(t("log_inverted_skipped", count=st['inverted_skipped']))
 
-            rej_file = (out_file + ".rejected.vcf") if cmd_type in ['vcf', 'gvcf'] else (out_file + ".rejected")
-            f_rej = open_file_write(rej_file) if fasta_obj else None
-
-            self.log(self.i18n.t("log_processing", path=in_file))
-            total = 0
-            mapped = 0
-            unmapped = 0
-            swapped = 0
-            rejected = 0
-
-            converted_records = []
-
-            with open_file_read(in_file) as f_in, open_file_write(out_file) as f_out:
-                if cmd_type in ['vcf', 'gvcf']:
-                    for line in f_in:
-                        if line.startswith('##'):
-                            f_out.write(line)
-                            if f_rej:
-                                f_rej.write(line)
-                            continue
-                        if line.startswith('#CHROM'):
-                            if fasta_obj:
-                                f_out.write('##INFO=<ID=LIFTOVER_SWAPPED,Number=0,Type=Flag,Description="Reference and alternate alleles were swapped during liftover to match target genome reference">\n')
-                                f_out.write('##INFO=<ID=LIFTOVER_REVERSE_COMPLEMENTED,Number=0,Type=Flag,Description="Alleles were reverse-complemented during liftover due to negative strand alignment">\n')
-                                if f_rej:
-                                    f_rej.write('##INFO=<ID=LIFTOVER_REJECT_REASON,Number=1,Type=String,Description="Reason for liftover rejection">\n')
-                            f_out.write(line)
-                            if f_rej:
-                                f_rej.write(line)
-                            continue
-
-                        total += 1
-                        parts = line.rstrip('\r\n').split('\t')
-                        if len(parts) < 5:
-                            continue
-
-                        chrom = parts[0]
-                        pos_1 = int(parts[1])
-                        ref = parts[3].upper()
-                        alt_str = parts[4].upper()
-                        alts = alt_str.split(',')
-
-                        conv = self._lift_coord(lo, chrom, pos_1 - 1, cmap, auto_chr)
-                        if not conv:
-                            unmapped += 1
-                            if f_unm:
-                                f_unm.write(line)
-                            continue
-
-                        target_c = self._format_output_chrom(chrom, conv[0])
-                        new_pos = conv[1] + 1
-                        strand = conv[2] if len(conv) > 2 else '+'
-
-                        # 1. Быстрый режим без FASTA
-                        if not fasta_obj:
-                            parts[0] = target_c
-                            parts[1] = str(new_pos)
-                            converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
-                            mapped += 1
-                        else:
-                            # 2. Строгий режим с валидацией по FASTA
-                            strand_flipped = False
-                            if strand == '-':
-                                cur_ref = rev_comp_allele(ref)
-                                cur_alts = [rev_comp_allele(a) for a in alts]
-                                strand_flipped = True
-                            else:
-                                cur_ref = ref
-                                cur_alts = alts
-
-                            fasta_ref = get_fasta_seq(fasta_obj, conv[0], new_pos - 1, new_pos - 1 + len(cur_ref))
-
-                            if fasta_ref is None:
-                                rejected += 1
-                                if f_rej:
-                                    parts_rej = list(parts)
-                                    tag = "LIFTOVER_REJECT_REASON=ContigNotFoundInFasta"
-                                    parts_rej[7] = tag if parts_rej[7] == '.' else parts_rej[7] + ';' + tag
-                                    f_rej.write('\t'.join(parts_rej) + '\n')
-                                continue
-
-                            # Случай 1: Референс совпал
-                            if cur_ref == fasta_ref:
-                                parts[0] = target_c
-                                parts[1] = str(new_pos)
-                                parts[3] = cur_ref
-                                parts[4] = ','.join(cur_alts)
-                                if strand_flipped:
-                                    parts[7] = "LIFTOVER_REVERSE_COMPLEMENTED" if parts[7] == '.' else parts[7] + ";LIFTOVER_REVERSE_COMPLEMENTED"
-                                converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
-                                mapped += 1
-
-                            # Случай 2: Референс сменился на мутантный аллель (Swap REF/ALT)
-                            elif len(cur_alts) == 1 and cur_alts[0] == fasta_ref and len(cur_ref) == len(fasta_ref):
-                                swapped_ref = cur_alts[0]
-                                swapped_alt = cur_ref
-                                parts[0] = target_c
-                                parts[1] = str(new_pos)
-                                parts[3] = swapped_ref
-                                parts[4] = swapped_alt
-
-                                if len(parts) >= 10:
-                                    fmt = parts[8]
-                                    for s_idx in range(9, len(parts)):
-                                        parts[s_idx] = swap_genotypes_and_format(fmt, parts[s_idx])
-
-                                info_tags = ["LIFTOVER_SWAPPED"]
-                                if strand_flipped:
-                                    info_tags.append("LIFTOVER_REVERSE_COMPLEMENTED")
-                                add_info = ';'.join(info_tags)
-                                parts[7] = add_info if parts[7] == '.' else parts[7] + ';' + add_info
-
-                                converted_records.append((target_c, new_pos, '\t'.join(parts) + '\n'))
-                                mapped += 1
-                                swapped += 1
-
-                            # Случай 3: Несовпадение референса (Mismatch)
-                            else:
-                                rejected += 1
-                                if f_rej:
-                                    parts_rej = list(parts)
-                                    tag = "LIFTOVER_REJECT_REASON=MismatchedRefAllele"
-                                    parts_rej[7] = tag if parts_rej[7] == '.' else parts_rej[7] + ';' + tag
-                                    f_rej.write('\t'.join(parts_rej) + '\n')
-
-                        if total % 25000 == 0:
-                            self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
-
-                    if converted_records:
-                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
-                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1]))
-                        for rec in converted_records:
-                            f_out.write(rec[2])
-                        converted_records.clear()
-
-                elif cmd_type == 'bed':
-                    for line in f_in:
-                        if line.startswith('#') or line.startswith('track') or line.startswith('browser'):
-                            f_out.write(line)
-                            continue
-                        total += 1
-                        parts = line.rstrip('\r\n').split('\t')
-                        if len(parts) < 3:
-                            continue
-                        chrom, start, end = parts[0], int(parts[1]), int(parts[2])
-                        conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
-                        conv_e = self._lift_coord(lo, chrom, end - 1, cmap, auto_chr)
-                        if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                            target_c = self._format_output_chrom(chrom, conv_s[0])
-                            new_s = min(conv_s[1], conv_e[1])
-                            new_e = max(conv_s[1], conv_e[1]) + 1
-                            parts[0] = target_c
-                            parts[1] = str(new_s)
-                            parts[2] = str(new_e)
-                            converted_records.append((target_c, new_s, new_e, '\t'.join(parts) + '\n'))
-                            mapped += 1
-                        else:
-                            unmapped += 1
-                            if f_unm:
-                                f_unm.write(line)
-                        if total % 25000 == 0:
-                            self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
-
-                    if converted_records:
-                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
-                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1], x[2]))
-                        for rec in converted_records:
-                            f_out.write(rec[3])
-                        converted_records.clear()
-
-                elif cmd_type == 'gff':
-                    for line in f_in:
-                        if line.startswith('#'):
-                            f_out.write(line)
-                            continue
-                        total += 1
-                        parts = line.rstrip('\r\n').split('\t')
-                        if len(parts) < 5:
-                            continue
-                        chrom, start, end = parts[0], int(parts[3]) - 1, int(parts[4]) - 1
-                        conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
-                        conv_e = self._lift_coord(lo, chrom, end, cmap, auto_chr)
-                        if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                            target_c = self._format_output_chrom(chrom, conv_s[0])
-                            new_s = min(conv_s[1], conv_e[1]) + 1
-                            new_e = max(conv_s[1], conv_e[1]) + 1
-                            parts[0] = target_c
-                            parts[3] = str(new_s)
-                            parts[4] = str(new_e)
-                            converted_records.append((target_c, new_s, new_e, '\t'.join(parts) + '\n'))
-                            mapped += 1
-                        else:
-                            unmapped += 1
-                            if f_unm:
-                                f_unm.write(line)
-                        if total % 25000 == 0:
-                            self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
-
-                    if converted_records:
-                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
-                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1], x[2]))
-                        for rec in converted_records:
-                            f_out.write(rec[3])
-                        converted_records.clear()
-
-                elif cmd_type == 'wig':
-                    curr_chrom = None
-                    for line in f_in:
-                        sline = line.strip()
-                        if not sline or sline.startswith('#') or sline.startswith('track'):
-                            f_out.write(line)
-                            continue
-                        if sline.startswith('variableStep') or sline.startswith('fixedStep'):
-                            tokens = sline.split()
-                            for t in tokens:
-                                if t.startswith('chrom='):
-                                    curr_chrom = t.split('=')[1]
-                            f_out.write(line)
-                            continue
-                        parts = sline.split()
-                        if len(parts) >= 2 and curr_chrom:
-                            total += 1
-                            pos = int(parts[0]) - 1
-                            conv = self._lift_coord(lo, curr_chrom, pos, cmap, auto_chr)
-                            if conv:
-                                parts[0] = str(conv[1] + 1)
-                                f_out.write('\t'.join(parts) + '\n')
-                                mapped += 1
-                            else:
-                                unmapped += 1
-                                if f_unm:
-                                    f_unm.write(line)
-                        else:
-                            f_out.write(line)
-
-                elif cmd_type == 'maf':
-                    chr_idx = 4
-                    start_idx = 5
-                    end_idx = 6
-                    header_found = False
-                    for line in f_in:
-                        if line.startswith('#'):
-                            f_out.write(line)
-                            continue
-                        parts = line.rstrip('\r\n').split('\t')
-                        if not header_found:
-                            header_found = True
-                            if 'Chromosome' in parts:
-                                chr_idx = parts.index('Chromosome')
-                            if 'Start_Position' in parts:
-                                start_idx = parts.index('Start_Position')
-                            if 'End_Position' in parts:
-                                end_idx = parts.index('End_Position')
-                            f_out.write(line)
-                            continue
-                        total += 1
-                        if len(parts) > max(chr_idx, start_idx, end_idx):
-                            chrom = parts[chr_idx]
-                            start = int(parts[start_idx]) - 1
-                            end = int(parts[end_idx]) - 1
-                            conv_s = self._lift_coord(lo, chrom, start, cmap, auto_chr)
-                            conv_e = self._lift_coord(lo, chrom, end, cmap, auto_chr)
-                            if conv_s and conv_e and conv_s[0] == conv_e[0]:
-                                target_c = self._format_output_chrom(chrom, conv_s[0])
-                                new_s = min(conv_s[1], conv_e[1]) + 1
-                                new_e = max(conv_s[1], conv_e[1]) + 1
-                                parts[chr_idx] = target_c
-                                parts[start_idx] = str(new_s)
-                                parts[end_idx] = str(new_e)
-                                converted_records.append((target_c, new_s, new_e, '\t'.join(parts) + '\n'))
-                                mapped += 1
-                            else:
-                                unmapped += 1
-                                if f_unm:
-                                    f_unm.write(line)
-                        if total % 25000 == 0:
-                            self.log(self.i18n.t("log_progress", total=total, mapped=mapped, unmapped=unmapped))
-
-                    if converted_records:
-                        self.log(self.i18n.t("log_sorting", count=len(converted_records)))
-                        converted_records.sort(key=lambda x: (chrom_sort_key(x[0]), x[1], x[2]))
-                        for rec in converted_records:
-                            f_out.write(rec[3])
-                        converted_records.clear()
-
-            if f_unm:
-                f_unm.close()
-                if unmapped == 0 and os.path.exists(unm_file):
-                    os.remove(unm_file)
-
-            if f_rej:
-                f_rej.close()
-                if rejected == 0 and os.path.exists(rej_file):
-                    os.remove(rej_file)
-
-            if fasta_obj:
-                self.log(self.i18n.t("log_summary_fasta", total=total, mapped=mapped, swapped=swapped, rejected=rejected, unmapped=unmapped))
-                self.log(self.i18n.t("log_finished"))
-                messagebox.showinfo(self.i18n.t("success_title"), self.i18n.t("success_message_fasta", mapped=mapped, total=total, swapped=swapped, rejected=rejected, unmapped=unmapped))
+            if fasta_obj is not None:
+                self.log(t("log_summary_fasta", total=st['total'], mapped=st['mapped'], swapped=st['swapped'],
+                           rejected=st['rejected'], unmapped=st['unmapped']))
+                msg = t("success_message_fasta", mapped=st['mapped'], total=st['total'], swapped=st['swapped'],
+                        rejected=st['rejected'], unmapped=st['unmapped'])
             else:
-                self.log(self.i18n.t("log_summary", total=total, mapped=mapped, unmapped=unmapped))
-                self.log(self.i18n.t("log_finished"))
-                messagebox.showinfo(self.i18n.t("success_title"), self.i18n.t("success_message", mapped=mapped, total=total, unmapped=unmapped))
+                self.log(t("log_summary", total=st['total'], mapped=st['mapped'], unmapped=st['unmapped']))
+                msg = t("success_message", mapped=st['mapped'], total=st['total'], unmapped=st['unmapped'])
+            self.log(t("log_finished"))
+            self.ui_queue.put(('info', (t("success_title"), msg)))
 
         except Exception as e:
-            self.log(f"ERROR: {str(e)}")
-            messagebox.showerror(self.i18n.t("err_title"), str(e))
+            self.log(t("log_error", error=e))
+            self.ui_queue.put(('error', (t("err_title"), str(e))))
         finally:
-            self.btn_run.config(state='normal')
-            self.btn_reset.config(state='normal')
+            if fasta_obj is not None:
+                try:
+                    fasta_obj.close()
+                except Exception:
+                    pass
+            self.ui_queue.put(('done', None))
 
 
 if __name__ == "__main__":
