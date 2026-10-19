@@ -1,4 +1,4 @@
-  VER="1.0.0" 
+  VER="1.0.1" 
   git tag -d v${VER} && git push origin --delete v${VER}
   git tag -a v${VER} -m "Release LiftOverZ v${VER}"
   git push origin v${VER} --tags
