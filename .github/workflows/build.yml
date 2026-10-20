@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -19,7 +19,10 @@ jobs:
     defaults:
       run:
         shell: bash
+    env:
+      PYTHONUTF8: '1'   # кириллица в выводе patch_chains.py не должна падать на Windows (cp1252)
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: windows-latest
@@ -27,24 +30,42 @@ jobs:
             asset_name: LiftOverZ-windows.exe
             out_binary: dist/LiftOverZ.exe
             data_sep: ';'
+            window_flag: --noconsole
+            bin_name: LiftOverZ
+
+          # Консольная сборка для CLI/скриптов: exe с --noconsole (GUI-подсистема) не выводит текст в терминал
+          # и не дожидается завершения в .bat-файлах, поэтому для Windows нужен отдельный файл
+          - os: windows-latest
+            arch_label: x64-cli
+            asset_name: LiftOverZ-cli-windows.exe
+            out_binary: dist/LiftOverZ-cli.exe
+            data_sep: ';'
+            window_flag: --console
+            bin_name: LiftOverZ-cli
 
           - os: ubuntu-latest
             arch_label: x64
             asset_name: LiftOverZ-linux
             out_binary: dist/LiftOverZ
             data_sep: ':'
+            window_flag: --noconsole
+            bin_name: LiftOverZ
 
           - os: macos-latest
             arch_label: arm64-apple-silicon
             asset_name: LiftOverZ-macos-arm64
             out_binary: dist/LiftOverZ
             data_sep: ':'
+            window_flag: --noconsole
+            bin_name: LiftOverZ
 
           - os: macos-15-intel
             arch_label: x86_64-intel
             asset_name: LiftOverZ-macos-intel
             out_binary: dist/LiftOverZ
             data_sep: ':'
+            window_flag: --noconsole
+            bin_name: LiftOverZ
 
     steps:
       - name: Checkout code
@@ -66,8 +87,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Download and patch chain files (UCSC)
+        # Скачивает недостающие chain-файлы и исправляет в них цепочки chrM; при любой ошибке сборка останавливается
+        run: python patch_chains.py
+
       - name: Build Standalone Executable with PyInstaller
-        run: pyinstaller --onefile --noconsole --add-data "locales${{ matrix.data_sep }}locales" --add-data "chains${{ matrix.data_sep }}chains" --collect-all tkinterdnd2 --collect-all pyliftover --collect-all pyfaidx --name LiftOverZ liftover_gui.py
+        run: pyinstaller --onefile ${{ matrix.window_flag }} --add-data "locales${{ matrix.data_sep }}locales" --add-data "chains${{ matrix.data_sep }}chains" --collect-all tkinterdnd2 --collect-all pyliftover --collect-all pyfaidx --name ${{ matrix.bin_name }} liftover_gui.py
 
       - name: Rename executable for Release
         run: mv ${{ matrix.out_binary }} ${{ matrix.asset_name }}
@@ -83,6 +108,8 @@ jobs:
     name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download all build artifacts
