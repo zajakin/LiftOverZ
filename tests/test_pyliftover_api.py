@@ -62,8 +62,8 @@ class RealPyliftoverApiTests(unittest.TestCase):
     def test_mito_routing_with_real_chain(self):
         engine = app.LiftOverEngine(self.lo, None, {}, True, False, lambda m: None,
                                     lambda key, **kw: key, chain_file=str(self.chain))
-        # legacy hg19 chrM: shifted by +2 after offset 3106
-        self.assertEqual(engine._lift_coord("chrM", 4000)[:2], ("chrM", 4002))
+        # legacy hg19 chrM: shifted by -2 (3998) when moving to hg38 (16569)
+        self.assertEqual(engine._lift_coord("chrM", 4000)[:2], ("chrM", 3998))
         # unprefixed MT is rCRS: routed to the chrMT identity chain, no shift
         self.assertEqual(engine._lift_coord("MT", 4000)[:2], ("chrM", 4000))
 
