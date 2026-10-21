@@ -87,6 +87,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Run regression tests
+        # Включая проверку допущений о реальном API pyliftover; падение теста останавливает сборку
+        run: python -m unittest discover -s tests -v
+
       - name: Download and patch chain files (UCSC)
         # Скачивает недостающие chain-файлы и исправляет в них цепочки chrM; при любой ошибке сборка останавливается
         run: python patch_chains.py

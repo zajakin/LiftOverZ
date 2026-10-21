@@ -134,6 +134,18 @@ def _mt_alias_candidates(name, known_sizes=None):
     return list(dict.fromkeys(result))
 
 
+def _mt_target_candidates(name, sizes):
+    """Кандидаты имён митохондрии в целевой FASTA / таблице длин.
+    Пары chrM <-> chrMT (оба с префиксом chr) по-прежнему не смешиваются (legacy hg19 chrM = 16 571 п.н.),
+    но контиги без префикса (MT / M — стиль Ensembl/NCBI, это всегда rCRS) допустимы для любого имени с chr."""
+    candidates = _mt_alias_candidates(name, sizes)
+    if str(name).lower().startswith('chr'):
+        for alias in _M_CONTIG_NAMES + _MT_CONTIG_NAMES:
+            if not alias.lower().startswith('chr') and alias not in candidates:
+                candidates.append(alias)
+    return candidates
+
+
 def _fasta_contig_sizes(fasta_obj):
     sizes = {}
     try:
@@ -184,7 +196,7 @@ def get_fasta_seq(fasta_obj, chrom, start_0, end_0, target_lengths=None):
             return None
         if _mt_kind(chrom):
             sizes = target_lengths if target_lengths is not None else _fasta_contig_sizes(fasta_obj)
-            candidates = _mt_alias_candidates(chrom, sizes)
+            candidates = _mt_target_candidates(chrom, sizes)
         else:
             candidates = [chrom]
             chrom_lower = chrom.lower()
@@ -364,7 +376,7 @@ def read_chain_target_sizes(chain_path):
 
 def lookup_length(lengths, name):
     if _mt_kind(name):
-        candidates = _mt_alias_candidates(name, lengths)
+        candidates = _mt_target_candidates(name, lengths)
     else:
         candidates = [name, name[3:] if name.lower().startswith('chr') else 'chr' + name]
     for candidate in candidates:
@@ -601,7 +613,11 @@ class LiftOverEngine:
     def _format_output_chrom(orig_chrom, target_chrom, explicit=False):
         if explicit: return target_chrom
         if _mt_kind(orig_chrom) or _mt_kind(target_chrom):
-            return target_chrom
+            if orig_chrom.lower().startswith('chr'):
+                return target_chrom          # UCSC-стиль на входе: фактическое имя контига целевой сборки
+            if _mt_kind(orig_chrom):
+                return orig_chrom            # Ensembl/NCBI-стиль (MT, M): как и у остальных хромосом, имя входа сохраняется
+            return target_chrom[3:] if target_chrom.lower().startswith('chr') else target_chrom
         orig_has_chr = orig_chrom.lower().startswith('chr')
         target_has_chr = target_chrom.lower().startswith('chr')
         if not orig_has_chr and target_has_chr:

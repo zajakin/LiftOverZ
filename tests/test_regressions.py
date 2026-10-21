@@ -21,7 +21,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 # Import the application's pure-Python validation and format logic without
 # requiring a real chain reader. Individual tests supply fake coordinate maps.
-if "pyliftover" not in sys.modules:
+try:
+    import pyliftover  # noqa: F401  (настоящая библиотека, если установлена)
+except ImportError:
     stub = types.ModuleType("pyliftover")
     class UnusedLiftOver:
         def __init__(self, *args, **kwargs):
@@ -160,8 +162,40 @@ class RegressionTests(unittest.TestCase):
         self.assertEqual(engine._lift_coord("chrM", 100), ("chrM", 100, "+"))
 
     def test_mitochondrial_output_keeps_actual_target_contig_name(self):
-        self.assertEqual(app.LiftOverEngine._format_output_chrom("chrM", "chrMT"), "chrMT")
-        self.assertEqual(app.LiftOverEngine._format_output_chrom("MT", "chrM"), "chrM")
+        fmt = app.LiftOverEngine._format_output_chrom
+        # UCSC-style input (chr prefix): the actual target contig name is used
+        self.assertEqual(fmt("chrM", "chrMT"), "chrMT")
+        self.assertEqual(fmt("chrM", "chrM"), "chrM")
+
+    def test_mitochondrial_output_keeps_ensembl_style_of_the_input(self):
+        # Ensembl/NCBI-style input must not get a lone "chrM" next to contigs 1, 2, 3 ...
+        fmt = app.LiftOverEngine._format_output_chrom
+        self.assertEqual(fmt("MT", "chrM"), "MT")
+        self.assertEqual(fmt("M", "chrM"), "M")
+        self.assertEqual(fmt("1", "chr1"), "1")
+
+    def test_ensembl_named_fasta_is_usable_for_ucsc_chrm_target(self):
+        fasta = {"MT": "A" * 16569}
+        self.assertEqual(app.get_fasta_seq(fasta, "chrM", 0, 1), "A")
+        self.assertEqual(app.lookup_length({"MT": 16569}, "chrM"), 16569)
+        # ... but chrM and chrMT (both chr-prefixed) are still never mixed up
+        self.assertIsNone(app.get_fasta_seq({"chrMT": "C" * 16569}, "chrM", 0, 1))
+        self.assertIsNone(app.get_fasta_seq({"chrM": "A" * 16571}, "chrMT", 0, 1))
+
+    def test_strict_mode_ensembl_fasta_does_not_reject_mito_records(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / "in.vcf"
+            output = Path(tmp) / "out.vcf"
+            source.write_text(
+                "##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+                "MT\t10\t.\tA\tC\t.\tPASS\t.\n", encoding="utf-8")
+            fasta = {"MT": "A" * 16569}
+            lo = FakeLiftOver(lambda chrom, pos: [("chrM", pos, "+")] if chrom in ("MT", "chrMT", "chrM") else None)
+            engine = app.LiftOverEngine(lo, fasta, {}, True, False, lambda m: None, lambda key, **kw: key)
+            stats = engine.run("vcf", str(source), str(output))
+            self.assertEqual((stats["mapped"], stats["rejected"]), (1, 0))
+            data = [l for l in output.read_text(encoding="utf-8").splitlines() if not l.startswith("#")]
+            self.assertTrue(data[0].startswith("MT\t10\t"), data)
 
 
     def test_hg19_chrmt_gets_explicit_rcrs_identity_mapping(self):
@@ -184,7 +218,7 @@ class RegressionTests(unittest.TestCase):
                 str(chain_path), patcher.PATCHES["hg19ToHg38.over.chain.gz"]
             )
             self.assertEqual(removed_legacy, 1)
-            identity_block = patcher.EXTRA_PATCHES["hg19ToHg38.over.chain.gz"]
+            identity_block = patcher.EXTRA_PATCHES["hg19ToHg38.over.chain.gz"][0]
             removed_chrmt = patcher.patch_chain_file(
                 str(chain_path), identity_block, require_match=False
             )
