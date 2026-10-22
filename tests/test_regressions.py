@@ -275,5 +275,41 @@ class RegressionTests(unittest.TestCase):
         self.assertNotIn("hs1ToHg19.over.chain.gz", patcher.PATCHES)
 
 
+class BomAndVersionTests(unittest.TestCase):
+    """Файлы из Блокнота/Excel Windows часто начинаются с UTF-8 BOM."""
+
+    def _engine(self, cmap=None):
+        lo = FakeLiftOver(lambda chrom, pos: [(chrom, pos, "+")] if chrom.startswith("chr") else None)
+        return app.LiftOverEngine(lo, None, cmap or {}, True, False, lambda m: None, lambda k, **kw: k)
+
+    def test_vcf_with_utf8_bom_keeps_fileformat_header(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp) / "in.vcf", Path(tmp) / "out.vcf"
+            src.write_bytes("##fileformat=VCFv4.2\n#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\n"
+                            "chr1\t5\t.\tA\tC\t.\t.\t.\n".encode("utf-8-sig"))
+            stats = self._engine().run("vcf", str(src), str(out))
+            text = out.read_text(encoding="utf-8")
+            self.assertEqual((stats["mapped"], stats["unmapped"]), (1, 0))
+            self.assertTrue(text.startswith("##fileformat=VCFv4.2"), text[:40])
+            self.assertNotIn("\ufeff", text)
+
+    def test_bed_with_utf8_bom_has_clean_chromosome_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            src, out = Path(tmp) / "in.bed", Path(tmp) / "out.bed"
+            src.write_bytes("chr1\t1\t10\tname\n".encode("utf-8-sig"))
+            self._engine().run("bed", str(src), str(out))
+            self.assertTrue(out.read_text(encoding="utf-8").startswith("chr1\t"))
+
+    def test_chromosome_map_and_locale_with_bom_are_readable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            m = Path(tmp) / "map.txt"
+            m.write_bytes("NC_000001.10\tchr1\n".encode("utf-8-sig"))
+            self.assertEqual(app.load_chrom_map(str(m)), {"NC_000001.10": "chr1"})
+
+    def test_version_is_defined(self):
+        import re
+        self.assertRegex(app.__version__, r"^\d+\.\d+\.\d+$")
+
+
 if __name__ == "__main__":
     unittest.main()

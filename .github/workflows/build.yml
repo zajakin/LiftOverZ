@@ -87,6 +87,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Check that the release tag matches __version__
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          VERSION=$(python -c "import re; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('liftover_gui.py', encoding='utf-8').read()).group(1))")
+          echo "Tag: ${GITHUB_REF_NAME} | __version__: v${VERSION}"
+          if [ "v${VERSION}" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match __version__ in liftover_gui.py (v${VERSION})"
+            exit 1
+          fi
+
       - name: Run regression tests
         # Включая проверку допущений о реальном API pyliftover; падение теста останавливает сборку
         run: python -m unittest discover -s tests -v

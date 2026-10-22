@@ -35,6 +35,9 @@ except ImportError:
 
 CHAIN_DOWNLOAD_URL = "https://hgdownload.soe.ucsc.edu/goldenPath"
 
+__version__ = "1.0.2"
+
+
 def detect_system_language():
     if sys.platform.startswith('win'):
         try:
@@ -352,8 +355,8 @@ def _is_gzip_file(filepath):
 
 def open_file_read(filepath):
     if _is_gzip_file(filepath):
-        return gzip.open(filepath, 'rt', encoding='utf-8', errors='replace')
-    return open(filepath, 'rt', encoding='utf-8', errors='replace')
+        return gzip.open(filepath, 'rt', encoding='utf-8-sig', errors='replace')
+    return open(filepath, 'rt', encoding='utf-8-sig', errors='replace')
 
 def open_file_write(filepath):
     if filepath.lower().endswith(('.gz', '.bgz')):
@@ -489,7 +492,7 @@ class I18nManager:
 
         if "en" in self.languages:
             try:
-                with open(self.languages["en"]["path"], 'r', encoding='utf-8') as f:
+                with open(self.languages["en"]["path"], 'r', encoding='utf-8-sig') as f:
                     self.fallback_translations = json.load(f)
             except Exception:
                 pass
@@ -521,7 +524,7 @@ class I18nManager:
                 for fpath in sorted(glob.glob(os.path.join(loc_dir, "*.json"))):
                     code = os.path.splitext(os.path.basename(fpath))[0].lower()
                     try:
-                        with open(fpath, 'r', encoding='utf-8') as f:
+                        with open(fpath, 'r', encoding='utf-8-sig') as f:
                             data = json.load(f)
                             if code not in self.languages:
                                 self.languages[code] = {"name": data.get("lang_name", code.upper()), "path": fpath}
@@ -533,7 +536,7 @@ class I18nManager:
         if code in self.languages:
             self.current_lang = code
             try:
-                with open(self.languages[code]["path"], 'r', encoding='utf-8') as f:
+                with open(self.languages[code]["path"], 'r', encoding='utf-8-sig') as f:
                     self.translations = json.load(f)
             except Exception:
                 self.translations = {}
@@ -1083,7 +1086,7 @@ def load_chrom_map(path):
         return cmap
     if not os.path.isfile(path):
         raise FileNotFoundError(f"Chromosome mapping file does not exist or is not a file: {path}")
-    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+    with open(path, 'r', encoding='utf-8-sig', errors='replace') as f:
         for line in f:
             line = line.strip()
             if not line or line.startswith('#'):
@@ -1312,7 +1315,7 @@ class LiftOverZApp:
         self.log_area.pack(fill=tk.BOTH, expand=True)
 
     def _update_ui_texts(self):
-        self.root.title(self.i18n.t("app_title"))
+        self.root.title(f'{self.i18n.t("app_title")}  v{__version__}')
         self.lbl_lang.config(text=self.i18n.t("language_label"))
         self.fmt_frame.config(text=self.i18n.t("step_1_format"))
         self.files_frame.config(text=self.i18n.t("step_2_files"))
@@ -1686,6 +1689,7 @@ if __name__ == "__main__":
             description="LiftOverZ - Standalone Genomic Coordinate Converter",
             formatter_class=argparse.RawTextHelpFormatter
         )
+        parser.add_argument("-V", "--version", action="version", version=f"LiftOverZ {__version__}")
         parser.add_argument("-i", "--input", required=True, help="Input genomic file path")
         parser.add_argument("-c", "--chain", required=True, help="Chain file path OR built-in preset name (e.g. hg19ToHg38.over.chain.gz)")
         parser.add_argument("-o", "--output", required=True, help="Output file path")

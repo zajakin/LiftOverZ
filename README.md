@@ -28,12 +28,13 @@ It requires **no installation**, runs as a single portable executable, includes 
 * **Zero Installation / 100% Portable:** Single executable running out of the box on Windows 11/10, Linux, and macOS.
 * **Native Cross-Platform Binaries:**
   * Windows (`LiftOverZ-windows.exe`)
+  * Windows console build for terminals and scripts (`LiftOverZ-cli-windows.exe`)
   * Linux x86_64 (`LiftOverZ-linux`)
   * macOS Apple Silicon M1/M2/M3/M4 (`LiftOverZ-macos-arm64`)
   * macOS Intel x86_64 (`LiftOverZ-macos-intel`)
 * **Pre-bundled & Selected Chain Fixes:** Popular human and mouse assembly chains are embedded directly into the binary. `patch_chains.py` downloads missing UCSC chains, validates the files, and patches by both source-contig name and length. It treats legacy hg19 `chrM` separately from current hg19 `chrMT`; the latter gets a direct rCRS identity map to hg38 `chrM`. Human chains involving hs1 keep their official mitochondrial alignment rather than receiving an unverified synthetic identity map.
 * **Link to the UCSC Chain Catalog:** Need another assembly pair? The GUI contains a link to <https://hgdownload.soe.ucsc.edu/goldenPath> (chains live in `<assembly>/liftOver/`, e.g. `hg19/liftOver/hg19ToHg38.over.chain.gz`). Download the file and drop it onto the chain field, or use **Browse...**.
-* **Chromosome Naming & Header Integrity:** Preserves chromosome prefix style for ordinary contigs (e.g. `1` versus `chr1`). If the input uses Ensembl/NCBI-styled mitochondria (`MT`, `M`), that exact style is preserved in the output. For UCSC-styled input (`chrM`, `chrMT`), the exact destination contig name from the Chain is used (e.g., mapping to `chrMT`), because hg19 `chrM` and `chrMT` represent different sequences. In VCF output the `##contig` lines are rebuilt for the **target** assembly (lengths come from the target FASTA, or from the chain file when no FASTA is given) and stale source-assembly metadata is dropped.
+* **Chromosome Naming & Header Integrity:** Preserves chromosome prefix style for ordinary contigs (e.g. `1` versus `chr1`). If the input uses Ensembl/NCBI-styled mitochondria (`MT`, `M`), that exact style is preserved in the output. For UCSC-styled input (`chrM`, `chrMT`), the exact destination contig name from the Chain is used (e.g. `chrM` stays `chrM` for hg38), because hg19 `chrM` and `chrMT` represent different sequences. In VCF output the `##contig` lines are rebuilt for the **target** assembly (lengths come from the target FASTA, or from the chain file when no FASTA is given) and stale source-assembly metadata is dropped.
 * **Automatic Coordinate Sorting (bounded memory):** Re-orders output entries by chromosome and genomic coordinate so that results can be indexed with `tabix` or loaded into genome browsers without external sorting tools. Very large inputs are sorted with an external merge sort (temporary files), so whole-genome VCFs do not have to fit into RAM.
 * **Optional Target FASTA Reference Validation:** Provide a target reference genome FASTA file (`pyfaidx`) to enable full biological validation for VCF files:
   * **Strand Flips:** On inverted (`-`) alignment blocks `REF`/`ALT` are reverse-complemented (IUPAC-aware), multi-base alleles are anchored at the correct end, indels are re-anchored to the base on their left using the target FASTA, and records are tagged `LIFTOVER_REVERSE_COMPLEMENTED`.
@@ -69,7 +70,7 @@ Official UCSC chain files frequently fail to map variants on mitochondrial DNA (
 
 For human coordinates, **`chrM` and `chrMT` must not automatically be treated as aliases**:
 
-* **hg19 has two different mitochondrial contigs.** The legacy `chrM` is 16,571 bp (the older NC_001807 sequence). The current `chrMT` is 16,569 bp and corresponds to rCRS, NC_012920.1. UCSC documents this distinction in its [Genome Browser FAQ](https://genome.ucsc.edu/FAQ/FAQgenes.html).
+* **hg19 has two different mitochondrial contigs.** The legacy `chrM` is 16,571 bp (the older NC_001807 sequence). The current `chrMT` is 16,569 bp and corresponds to rCRS, NC_012920.1. UCSC documents this distinction in its [Genome Browser FAQ](https://genome.ucsc.edu/FAQ/FAQgenes.html#mito).
 * **hg38 uses `chrM` for the 16,569-bp rCRS sequence.** Therefore a source record on hg19 `chrM` is not interchangeable with a record on hg19 `chrMT`, even though both are mitochondrial.
 
 LiftOverZ uses the contig name as well as the source-contig length when applying a custom chain patch:
@@ -146,6 +147,7 @@ LiftOverZ fully supports headless execution. If you pass any command-line argume
 * `--no-auto-chr` : Disable auto-matching of `chr` and `MT` prefixes
 * `--no-unmapped` : Do not save unmapped records to a `.unmapped` file
 * `--lang` : Language code for log output (`en`, `ru`, `zh`, `hi`, `es`, `ar`, etc.)
+* `-V, --version` : Print the program version and exit
 
 **Notes:**
 * **Windows:** use `LiftOverZ-cli-windows.exe` in terminals and scripts. The regular `LiftOverZ-windows.exe` is a GUI-subsystem build: it prints nothing to the console and `cmd` does not wait for it to finish.
@@ -159,11 +161,12 @@ LiftOverZ fully supports headless execution. If you pass any command-line argume
 
 ### How Records Are Handled
 
-* **Chain gaps:** a VCF record whose `REF` span crosses an alignment gap is not lifted (it goes to `.unmapped`), because its allele lengths would no longer be valid. BED / GFF / MAF / Wiggle intervals are lifted when both ends map to the same chromosome and strand.
+* **Chain gaps:** a VCF record whose `REF` span crosses an alignment gap is not lifted (it goes to `.unmapped`), because its allele lengths would no longer be valid. BED / GFF / MAF intervals are lifted when both ends map to the same chromosome and strand (BED12 additionally requires an unchanged length); Wiggle intervals additionally require that their span length is unchanged, otherwise they go to `.unmapped`.
 * **Inverted blocks:** coordinates, strand columns and alleles are flipped as described above. VCF breakend (`BND`) alleles on inverted blocks are sent to `.unmapped`.
 * **Malformed and short lines:** unparsable lines are written to `.unmapped`; VCF lines with fewer than 8 columns are padded with `.`; blank lines are ignored. Therefore `Total = Mapped + Unmapped + Rejected`.
 * **Line endings:** output always uses `LF`, also on Windows (CRLF breaks several VCF tools).
 * **Failures:** if a run fails, partially written output files are removed instead of being left behind. The main output and all sidecar outputs (`.unmapped`, `.rejected.vcf` / `.rejected`) are checked against the input, Chain, FASTA, and chromosome mapping files to prevent accidental overwrites.
+* **Text encoding:** input is read as UTF-8 and a leading BOM (added by Windows editors) is tolerated and removed; output is always written as UTF-8 without BOM. This also applies to the chromosome mapping file and to custom `locales/*.json` translations.
 
 ---
 
@@ -193,7 +196,7 @@ LiftOverZ fully supports headless execution. If you pass any command-line argume
 ### Options & Configuration
 
 * **Target Reference FASTA (Optional):** Path to target assembly FASTA file (`.fa`, `.fasta`, `.fa.gz`). Automatically generates a `.fai` index on first run if missing (the folder must be writable). Compressed FASTA must be **bgzip**-compressed — plain gzip is not supported by `pyfaidx`.
-* **Auto-match 'chr' prefix:** When checked, reconciles naming variations between NCBI/Ensembl (`1`, `2`, `MT`) and UCSC (`chr1`, `chr2`, `chrM`) while retaining original input prefix format in the output.
+* **Auto-match 'chr' prefix:** When checked, reconciles naming variants of ordinary contigs between NCBI/Ensembl (`1`, `2`) and UCSC (`chr1`, `chr2`) and keeps the input style in the output. Mitochondrial names are matched more strictly: `chrM` and `chrMT` are never treated as aliases of each other, un-prefixed `MT`/`M` are resolved using the names and lengths found in the chain/FASTA, and `chrM` is not matched to a chain contig named `MT` (use the chromosome mapping file for that). See *Mitochondrial Contig Names* above.
 * **Save unmapped records:** Generates a `.unmapped` file containing lines that could not be lifted over.
 * **Chromosome Mapping File (Optional):** Whitespace-delimited text file mapping custom contig names (lines starting with `#` are ignored). Contigs listed here are written to the output with the target-build name from the chain file (e.g. `NC_000001.10` -> `chr1`):
 ```text
@@ -232,6 +235,9 @@ cd LiftOverZ
 # Install dependencies
 pip install -r requirements.txt
 
+# Download the official UCSC chains and apply the mitochondrial patches (creates ./chains)
+python patch_chains.py
+
 # Run tests
 python -m unittest discover -s tests -v
 
@@ -248,6 +254,7 @@ pyinstaller --onefile --noconsole \
   --name LiftOverZ liftover_gui.py
 ```
 *(On Windows, replace `:locales` and `:chains` with `;locales` and `;chains` in `--add-data`)*
+*(To get a Windows executable that prints to the terminal and can be used in scripts, build it with `--console` instead of `--noconsole` and `--name LiftOverZ-cli`; this is what the release workflow does for `LiftOverZ-cli-windows.exe`.)*
 
 ---
 
@@ -271,6 +278,7 @@ pyinstaller --onefile --noconsole \
 * **Полная портативность:** Один исполняемый файл без внешних зависимостей. Запускается без инсталлятора на Windows 11/10, Linux и macOS.
 * **Нативные бинарники под все платформы:**
   * Windows (`LiftOverZ-windows.exe`)
+  * Windows, консольная версия для терминала и скриптов (`LiftOverZ-cli-windows.exe`)
   * Linux x86_64 (`LiftOverZ-linux`)
   * macOS на процессорах Apple Silicon M1/M2/M3/M4 (`LiftOverZ-macos-arm64`)
   * macOS на процессорах Intel (`LiftOverZ-macos-intel`)
@@ -315,7 +323,7 @@ pyinstaller --onefile --noconsole \
 
 Для человеческих сборок **`chrM` и `chrMT` нельзя автоматически считать синонимами**:
 
-* **В hg19 есть два разных митохондриальных контига.** Устаревший `chrM` имеет длину 16 571 п. н. и соответствует старой последовательности NC_001807. Актуальный `chrMT` имеет длину 16 569 п. н. и соответствует rCRS, NC_012920.1. Это различие описано в [FAQ UCSC Genome Browser](https://genome.ucsc.edu/FAQ/FAQgenes.html).
+* **В hg19 есть два разных митохондриальных контига.** Устаревший `chrM` имеет длину 16 571 п. н. и соответствует старой последовательности NC_001807. Актуальный `chrMT` имеет длину 16 569 п. н. и соответствует rCRS, NC_012920.1. Это различие описано в [FAQ UCSC Genome Browser](https://genome.ucsc.edu/FAQ/FAQgenes.html#mito).
 * **В hg38 контиг `chrM` — это rCRS длиной 16 569 п. н.** Поэтому координаты hg19 `chrM` и hg19 `chrMT` не взаимозаменяемы, хотя оба контига являются митохондриальными.
 
 При применении пользовательских исправлений LiftOverZ учитывает буквальное имя исходного контига и его длину:
@@ -390,6 +398,7 @@ LiftOverZ полностью поддерживает работу в терми
 * `--no-auto-chr` : Отключить авто-сопоставление префиксов `chr` и `MT`
 * `--no-unmapped` : Не создавать файл `.unmapped` для пропущенных записей
 * `--lang` : Код языка для вывода в консоль (`en`, `ru`, `zh`, `hi`, `es`, `ar`, и т.д.)
+* `-V, --version` : Показать версию программы и выйти
 
 **Примечания:**
 * **Windows:** в терминале и скриптах используйте `LiftOverZ-cli-windows.exe`. Обычный `LiftOverZ-windows.exe` — сборка с GUI-подсистемой: она ничего не выводит в консоль, а `cmd` не дожидается её завершения.
@@ -403,11 +412,12 @@ LiftOverZ полностью поддерживает работу в терми
 
 ### Как обрабатываются записи
 
-* **Разрывы цепочки:** запись VCF, у которой `REF` пересекает разрыв выравнивания, не переносится (попадает в `.unmapped`), поскольку длины аллелей перестали бы быть корректными. Интервалы BED / GFF / MAF / Wiggle переносятся, если оба конца попадают на одну хромосому и одну цепь.
+* **Разрывы цепочки:** запись VCF, у которой `REF` пересекает разрыв выравнивания, не переносится (попадает в `.unmapped`), поскольку длины аллелей перестали бы быть корректными. Интервалы BED / GFF / MAF переносятся, если оба конца попадают на одну хромосому и одну цепь (для BED12 дополнительно требуется неизменная длина); интервалы Wiggle дополнительно должны сохранить длину (span), иначе они попадают в `.unmapped`.
 * **Инвертированные блоки:** координаты, столбцы цепи и аллели переворачиваются, как описано выше. Аллели-брейкенды VCF (`BND`) на инвертированных блоках отправляются в `.unmapped`.
 * **Некорректные и короткие строки:** строки, которые не удалось разобрать, пишутся в `.unmapped`; строки VCF короче 8 столбцов дополняются `.`; пустые строки игнорируются. Поэтому всегда `Всего = Перенесено + Пропущено + Отклонено`.
 * **Переводы строк:** на выходе всегда `LF`, в том числе в Windows (CRLF ломает ряд VCF-утилит).
-* **Сбои:** при ошибке недописанные выходные файлы удаляются, а не остаются на диске. Выходной файл не может совпадать с входным.
+* **Сбои:** при ошибке недописанные выходные файлы удаляются, а не остаются на диске. Основной выходной файл и все побочные (`.unmapped`, `.rejected.vcf` / `.rejected`) проверяются на совпадение с входным файлом, chain-файлом, FASTA и файлом соответствия хромосом, чтобы исключить случайную перезапись.
+* **Кодировка текста:** вход читается как UTF-8, ведущий BOM (его добавляют редакторы Windows) допускается и отбрасывается; выход всегда записывается как UTF-8 без BOM. Это относится и к файлу соответствия хромосом, и к собственным переводам `locales/*.json`.
 
 ---
 
@@ -437,7 +447,7 @@ LiftOverZ полностью поддерживает работу в терми
 ### Настройки и параметры
 
 * **Целевой референс FASTA (Опционально):** Путь к FASTA-файлу целевой сборки (`.fa`, `.fasta`, `.fa.gz`). При первом запуске автоматически создаёт `.fai` индекс, если он отсутствует (папка должна быть доступна для записи). Сжатая FASTA должна быть упакована **bgzip** — обычный gzip `pyfaidx` не поддерживает.
-* **Авто-сопоставление префикса 'chr':** Устраняет распространённые различия в названиях аутосом и половых хромосом. Для митохондрии явные имена `chrM` и `chrMT` не смешиваются, если Chain/FASTA содержит оба контига; непредшествующие `chr` псевдонимы `M`/`MT` сопоставляются с учётом доступных имён и длин. 
+* **Авто-сопоставление префикса 'chr':** Устраняет различия в названиях обычных контигов между NCBI/Ensembl (`1`, `2`) и UCSC (`chr1`, `chr2`), сохраняя в результате стиль входного файла. Для митохондрии правила строже: `chrM` и `chrMT` никогда не считаются псевдонимами друг друга, имена без префикса `MT`/`M` сопоставляются с учётом имён и длин, найденных в chain/FASTA, а `chrM` не сопоставляется автоматически с контигом цепочки `MT` (для этого используйте файл соответствия хромосом). См. раздел «Имена митохондриального контига» выше.
 * **Сохранять неперенесённые записи:** Создаёт файл `.unmapped` со строками, для которых в цепочке переноса не нашлось пары.
 * **Файл соответствия хромосом (Опционально):** Текстовый файл с соответствиями нестандартных имен (разделитель — пробел или табуляция, строки с `#` игнорируются). Перечисленные здесь контиги записываются в результат под именем целевой сборки из chain-файла (например, `NC_000001.10` -> `chr1`).
 ```text
@@ -476,6 +486,9 @@ cd LiftOverZ
 # Установка зависимостей
 pip install -r requirements.txt
 
+# Скачивание официальных цепочек UCSC и применение митохондриальных патчей (создаёт папку ./chains)
+python patch_chains.py
+
 # Запуск тестов
 python -m unittest discover -s tests -v
 
@@ -492,3 +505,4 @@ pyinstaller --onefile --noconsole \
   --name LiftOverZ liftover_gui.py
 ```
 *(В Windows замените разделители двоеточия `:locales` и `:chains` на точку с запятой `;locales` и `;chains` в `--add-data`)*
+*(Чтобы получить exe для Windows, который выводит текст в терминал и годится для скриптов, соберите его с `--console` вместо `--noconsole` и `--name LiftOverZ-cli`; именно так release-workflow собирает `LiftOverZ-cli-windows.exe`.)*
